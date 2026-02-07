@@ -48,12 +48,12 @@ type AutoSettings = {
 };
 
 const PIPELINE_STEPS = [
-  { key: "checking", label: "Duplicate Check", icon: Shield, description: "Checking for similar existing articles" },
-  { key: "researching", label: "Web Research", icon: Globe, description: "Searching the internet for real facts" },
-  { key: "outlining", label: "Outline", icon: FileText, description: "Structuring content flow" },
-  { key: "writing", label: "Writing (Pro)", icon: Sparkles, description: "Generating with Gemini Pro" },
-  { key: "verifying", label: "Fact Check", icon: Shield, description: "Verifying claims against web" },
-  { key: "optimizing", label: "Quality Gate", icon: Target, description: "SEO & quality scoring" },
+  { key: "checking", label: "Duplicate Check", icon: Shield, description: "Flash Lite — cheapest model for simple checks" },
+  { key: "researching", label: "Web Research", icon: Globe, description: "2.5 Flash + Google Search — real web grounding" },
+  { key: "outlining", label: "Outline", icon: FileText, description: "3 Flash — smart content structuring" },
+  { key: "writing", label: "Writing", icon: Sparkles, description: "3 Pro → fallback to 3 Flash on rate limit" },
+  { key: "verifying", label: "Fact Check", icon: Shield, description: "2.5 Flash + Google Search — web verification" },
+  { key: "optimizing", label: "Quality Gate", icon: Target, description: "3 Flash — SEO & quality scoring" },
 ];
 
 const STATUS_COLORS: Record<string, string> = {

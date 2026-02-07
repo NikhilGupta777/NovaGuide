@@ -9,9 +9,13 @@ const corsHeaders = {
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-// ── Models ────────────────────────────────────────────────────────────
-const MODEL_FLASH = "gemini-2.5-flash";
-const MODEL_PRO = "gemini-2.5-pro";
+// ── Optimal Model Strategy ────────────────────────────────────────────
+// Each model is chosen for its specific strength in the pipeline
+const MODEL_LITE = "gemini-2.5-flash-lite"; // Cheapest: simple tasks (dup check)
+const MODEL_RESEARCH = "gemini-2.5-flash";   // Stable grounding: research & fact-check
+const MODEL_FAST = "gemini-3-flash-preview"; // Smart + fast: outline, quality gate
+const MODEL_PRO = "gemini-3-pro-preview";    // Best quality: article writing
+const MODEL_PRO_FALLBACK = "gemini-3-flash-preview"; // Fallback if Pro hits 429
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -60,7 +64,6 @@ async function callGemini(
   if (systemInstruction) {
     body.systemInstruction = { parts: [{ text: systemInstruction }] };
   }
-  // Set generation config
   body.generationConfig = { temperature: 0.7 };
 
   console.log(`Calling Gemini model: ${model}`);
@@ -73,11 +76,33 @@ async function callGemini(
   if (!resp.ok) {
     const txt = await resp.text();
     console.error(`Gemini API error (${model}):`, resp.status, txt);
-    if (resp.status === 429) throw { status: 429, message: "Gemini rate limit exceeded. Please try again later." };
+    if (resp.status === 429) throw { status: 429, message: `Rate limit on ${model}`, model };
     if (resp.status === 403) throw { status: 403, message: "Gemini API key invalid or quota exceeded." };
     throw new Error(`Gemini API returned ${resp.status}: ${txt}`);
   }
   return resp.json();
+}
+
+// Auto-fallback: tries primary model, falls back on 429
+async function callGeminiWithFallback(
+  apiKey: string,
+  primaryModel: string,
+  fallbackModel: string,
+  contents: unknown[],
+  tools?: unknown[],
+  systemInstruction?: string
+) {
+  try {
+    return await callGemini(apiKey, primaryModel, contents, tools, systemInstruction);
+  } catch (err: unknown) {
+    const e = err as { status?: number; model?: string };
+    if (e.status === 429) {
+      console.log(`Model ${primaryModel} rate limited, falling back to ${fallbackModel}`);
+      await delay(2000);
+      return await callGemini(apiKey, fallbackModel, contents, tools, systemInstruction);
+    }
+    throw err;
+  }
 }
 
 function extractText(response: Record<string, unknown>): string {
@@ -133,18 +158,17 @@ function delay(ms: number) {
 
 // ── Pipeline Steps ──────────────────────────────────────────────────
 
-// Step 1: Duplicate Check
+// Step 1: Duplicate Check (uses cheapest model)
 async function step1_duplicateCheck(
   apiKey: string,
   topic: string,
   existingTitles: string[]
 ): Promise<{ isDuplicate: boolean; similarTitle?: string; score?: number }> {
-  console.log("Pipeline Step 1: Duplicate Check for:", topic);
+  console.log("Pipeline Step 1: Duplicate Check (Flash Lite) for:", topic);
 
   if (existingTitles.length === 0) return { isDuplicate: false };
 
   const systemPrompt = `You are a content similarity checker. Compare the proposed topic against existing article titles. Determine if the topic is too similar to any existing article (would cover essentially the same content).
-
 Return your analysis using the check_duplicate function.`;
 
   const prompt = `Proposed topic: "${topic}"
@@ -154,11 +178,11 @@ ${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
 Is this topic too similar to any existing article? A score of 80+ means it's a duplicate.`;
 
-  const response = await callGemini(apiKey, MODEL_FLASH, [
+  const response = await callGemini(apiKey, MODEL_LITE, [
     { role: "user", parts: [{ text: prompt }] }
   ], [
     {
-      functionDeclarations: [{
+      function_declarations: [{
         name: "check_duplicate",
         description: "Return duplicate check results",
         parameters: {
@@ -185,12 +209,12 @@ Is this topic too similar to any existing article? A score of 80+ means it's a d
   };
 }
 
-// Step 2: Deep Web Research with Google Search Grounding
+// Step 2: Deep Web Research with Google Search Grounding (stable model)
 async function step2_research(
   apiKey: string,
   topic: string
 ): Promise<{ research: string; sources: { title: string; url: string }[] }> {
-  console.log("Pipeline Step 2: Deep Web Research with Grounding for:", topic);
+  console.log("Pipeline Step 2: Deep Web Research (2.5 Flash + Google Search) for:", topic);
 
   const systemPrompt = `You are a world-class research analyst. Research this topic thoroughly using Google Search to find the most current and accurate information. Focus on:
 1. The core problem and who faces it
@@ -202,10 +226,10 @@ async function step2_research(
 
 Produce comprehensive, well-organized research notes of 500-800 words based on REAL information from the web. Cite specific facts and data.`;
 
-  const response = await callGemini(apiKey, MODEL_FLASH, [
+  const response = await callGemini(apiKey, MODEL_RESEARCH, [
     { role: "user", parts: [{ text: `Research this topic thoroughly: "${topic}". Search the web for the most current and accurate information.` }] }
   ], [
-    { googleSearch: {} }
+    { google_search: {} }
   ], systemPrompt);
 
   const research = extractText(response);
@@ -215,9 +239,9 @@ Produce comprehensive, well-organized research notes of 500-800 words based on R
   return { research, sources };
 }
 
-// Step 3: Generate Outline
+// Step 3: Generate Outline (smart + fast model)
 async function step3_outline(apiKey: string, topic: string, research: string): Promise<string> {
-  console.log("Pipeline Step 3: Generate Outline");
+  console.log("Pipeline Step 3: Generate Outline (3 Flash)");
 
   const systemPrompt = `You are an expert content strategist. Based on the research notes, create a detailed article outline.
 
@@ -231,14 +255,14 @@ The outline should follow this structure:
 
 Return ONLY the outline as a numbered/nested Markdown list. Be specific about what each section should cover.`;
 
-  const response = await callGemini(apiKey, MODEL_FLASH, [
+  const response = await callGemini(apiKey, MODEL_FAST, [
     { role: "user", parts: [{ text: `Topic: "${topic}"\n\nResearch Notes:\n${research}\n\nCreate a detailed article outline.` }] }
   ], undefined, systemPrompt);
 
   return extractText(response);
 }
 
-// Step 4: Write Article (using Pro model for quality)
+// Step 4: Write Article (best model with fallback)
 async function step4_write(
   apiKey: string,
   topic: string,
@@ -248,7 +272,7 @@ async function step4_write(
   sources: { title: string; url: string }[],
   categoryId?: string
 ): Promise<Record<string, unknown>> {
-  console.log("Pipeline Step 4: Write Article (Pro model)");
+  console.log("Pipeline Step 4: Write Article (Gemini 3 Pro → fallback Flash)");
 
   const categoryList = categories.map(c => `${c.name} (ID: ${c.id})`).join(", ");
   const sourcesRef = sources.length > 0
@@ -283,11 +307,11 @@ WRITING RULES:
 
 You MUST respond using the generate_article function.`;
 
-  const response = await callGemini(apiKey, MODEL_PRO, [
+  const response = await callGeminiWithFallback(apiKey, MODEL_PRO, MODEL_PRO_FALLBACK, [
     { role: "user", parts: [{ text: `Write the full article about: "${topic}"` }] }
   ], [
     {
-      functionDeclarations: [{
+      function_declarations: [{
         name: "generate_article",
         description: "Generate a structured help article with all required fields",
         parameters: {
@@ -315,35 +339,35 @@ You MUST respond using the generate_article function.`;
   return args;
 }
 
-// Step 5: Fact Verification with Google Search Grounding
+// Step 5: Fact Verification with Google Search Grounding (stable model)
 async function step5_factCheck(
   apiKey: string,
   article: Record<string, unknown>
 ): Promise<{ factualScore: number; verifiedClaims: string[]; flaggedClaims: string[] }> {
-  console.log("Pipeline Step 5: Fact Verification with Grounding");
+  console.log("Pipeline Step 5: Fact Verification (2.5 Flash + Google Search)");
 
-  await delay(3000); // Rate limit delay
+  await delay(3000);
 
   const content = article.content as string;
   const title = article.title as string;
 
-  // Step 5a: Search the web to verify claims (Google Search only)
-  const searchResponse = await callGemini(apiKey, MODEL_FLASH, [
+  // Step 5a: Search the web to verify claims (Google Search only, NO function calling)
+  const searchResponse = await callGemini(apiKey, MODEL_RESEARCH, [
     { role: "user", parts: [{ text: `Verify the key factual claims in this article by searching the web:\n\nTitle: ${title}\n\nContent:\n${content.substring(0, 5000)}\n\nExtract 3-5 key claims and check if they are accurate based on current web information. List each claim and whether it's verified or not.` }] }
   ], [
-    { googleSearch: {} }
+    { google_search: {} }
   ], "You are a fact-checker. Verify claims using Google Search and report which are accurate and which are not.");
 
   const verificationText = extractText(searchResponse);
 
   await delay(2000);
 
-  // Step 5b: Parse verification results into structured data (function calling only)
-  const parseResponse = await callGemini(apiKey, MODEL_FLASH, [
+  // Step 5b: Parse verification results into structured data (function calling only, NO google_search)
+  const parseResponse = await callGemini(apiKey, MODEL_LITE, [
     { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
   ], [
     {
-      functionDeclarations: [{
+      function_declarations: [{
         name: "fact_check",
         description: "Return fact-check results",
         parameters: {
@@ -372,15 +396,15 @@ async function step5_factCheck(
   };
 }
 
-// Step 6: Quality Gate + SEO Optimization
+// Step 6: Quality Gate + SEO Optimization (smart model)
 async function step6_qualityGate(
   apiKey: string,
   article: Record<string, unknown>,
   factualScore: number
 ): Promise<{ article: Record<string, unknown>; qualityScore: number; reviewNotes: string; needsReview: boolean }> {
-  console.log("Pipeline Step 6: Quality Gate + SEO");
+  console.log("Pipeline Step 6: Quality Gate + SEO (3 Flash)");
 
-  await delay(3000); // Rate limit delay
+  await delay(3000);
 
   const systemPrompt = `You are a senior editor and SEO specialist. Review this article and provide quality improvements.
 
@@ -395,7 +419,7 @@ The article's factual verification score is ${factualScore}/10.
 
 Return your review using the quality_review function.`;
 
-  const response = await callGemini(apiKey, MODEL_FLASH, [
+  const response = await callGemini(apiKey, MODEL_FAST, [
     {
       role: "user",
       parts: [{
@@ -404,7 +428,7 @@ Return your review using the quality_review function.`;
     }
   ], [
     {
-      functionDeclarations: [{
+      function_declarations: [{
         name: "quality_review",
         description: "Return quality improvements",
         parameters: {
@@ -447,7 +471,7 @@ Return your review using the quality_review function.`;
   };
 }
 
-// Step 4b: Rewrite article if quality is too low
+// Rewrite article if quality is too low (uses Pro with fallback)
 async function rewriteArticle(
   apiKey: string,
   article: Record<string, unknown>,
@@ -474,11 +498,11 @@ Rewrite the article to address the feedback. Make it clearer, more complete, and
 
 You MUST respond using the generate_article function.`;
 
-  const response = await callGemini(apiKey, MODEL_PRO, [
+  const response = await callGeminiWithFallback(apiKey, MODEL_PRO, MODEL_PRO_FALLBACK, [
     { role: "user", parts: [{ text: `Rewrite this article to improve quality:\n\nTitle: ${article.title}\n\nContent:\n${(article.content as string).substring(0, 5000)}` }] }
   ], [
     {
-      functionDeclarations: [{
+      function_declarations: [{
         name: "generate_article",
         description: "Generate a rewritten help article",
         parameters: {
@@ -501,7 +525,7 @@ You MUST respond using the generate_article function.`;
   ], systemPrompt);
 
   const args = extractFunctionCall(response);
-  if (!args) return article; // Keep original if rewrite fails
+  if (!args) return article;
   return { ...article, ...args, category_id: article.category_id };
 }
 
@@ -522,6 +546,7 @@ serve(async (req) => {
     if (!topic) return jsonResp({ error: "Topic is required" }, 400);
 
     console.log(`AI Agent: Starting 6-step ${mode} pipeline for: "${topic}"`);
+    console.log(`Models: Lite=${MODEL_LITE}, Research=${MODEL_RESEARCH}, Fast=${MODEL_FAST}, Pro=${MODEL_PRO}`);
 
     // Fetch existing articles for duplicate check
     const { data: existingArticles } = await db
@@ -535,7 +560,7 @@ serve(async (req) => {
     // Create pipeline run record
     const { data: run, error: runError } = await db
       .from("agent_runs")
-      .insert({ topic, mode, status: "checking", current_step: 1, total_steps: 6, model_used: `${MODEL_FLASH}/${MODEL_PRO}` })
+      .insert({ topic, mode, status: "checking", current_step: 1, total_steps: 6, model_used: `${MODEL_PRO}→${MODEL_PRO_FALLBACK}` })
       .select()
       .single();
     if (runError) {
@@ -546,7 +571,7 @@ serve(async (req) => {
     const runId = run.id;
 
     try {
-      // STEP 1: Duplicate Check
+      // STEP 1: Duplicate Check (Flash Lite - cheapest)
       await updateRunStatus(db, runId, "checking", 1);
       const dupCheck = await step1_duplicateCheck(GEMINI_API_KEY, topic, existingTitles);
 
@@ -573,7 +598,7 @@ serve(async (req) => {
 
       await delay(2000);
 
-      // STEP 2: Deep Web Research with Google Search Grounding
+      // STEP 2: Deep Web Research with Google Search Grounding (2.5 Flash)
       await updateRunStatus(db, runId, "researching", 2);
       const { research, sources } = await step2_research(GEMINI_API_KEY, topic);
       await db.from("agent_runs").update({
@@ -583,34 +608,34 @@ serve(async (req) => {
 
       await delay(3000);
 
-      // STEP 3: Generate Outline
+      // STEP 3: Generate Outline (3 Flash)
       await updateRunStatus(db, runId, "outlining", 3);
       const outline = await step3_outline(GEMINI_API_KEY, topic, research);
       await db.from("agent_runs").update({ generated_outline: outline }).eq("id", runId);
 
       await delay(3000);
 
-      // STEP 4: Write Article (Pro model)
+      // STEP 4: Write Article (3 Pro → fallback to 3 Flash)
       await updateRunStatus(db, runId, "writing", 4);
       const { data: categories } = await db.from("categories").select("id, name, slug").order("sort_order");
       let article = await step4_write(GEMINI_API_KEY, topic, research, outline, categories || [], sources, categoryId);
 
       await delay(3000);
 
-      // STEP 5: Fact Verification with Grounding
+      // STEP 5: Fact Verification with Grounding (2.5 Flash)
       await updateRunStatus(db, runId, "verifying", 5);
       const factCheck = await step5_factCheck(GEMINI_API_KEY, article);
       await db.from("agent_runs").update({ factual_score: factCheck.factualScore }).eq("id", runId);
 
       await delay(3000);
 
-      // STEP 6: Quality Gate + SEO
+      // STEP 6: Quality Gate + SEO (3 Flash)
       await updateRunStatus(db, runId, "optimizing", 6);
       let qualityResult = await step6_qualityGate(GEMINI_API_KEY, article, factCheck.factualScore);
 
       // Auto-retry if quality < 7
       if (qualityResult.qualityScore < 7) {
-        console.log(`Quality score ${qualityResult.qualityScore}/10 — rewriting...`);
+        console.log(`Quality score ${qualityResult.qualityScore}/10 — rewriting with Pro...`);
         await delay(3000);
         article = await rewriteArticle(GEMINI_API_KEY, article, qualityResult.reviewNotes, research, categories || []);
         qualityResult = await step6_qualityGate(GEMINI_API_KEY, article, factCheck.factualScore);
@@ -680,7 +705,7 @@ serve(async (req) => {
           status: articleStatus,
           mode,
           run_id: runId,
-          models: { flash: MODEL_FLASH, pro: MODEL_PRO },
+          models: { lite: MODEL_LITE, research: MODEL_RESEARCH, fast: MODEL_FAST, pro: MODEL_PRO },
         },
       });
 

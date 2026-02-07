@@ -8,7 +8,8 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_RESEARCH = "gemini-2.5-flash"; // Stable grounding model
+const MODEL_PARSE = "gemini-2.5-flash-lite"; // Cheap parsing model
 
 async function callGemini(
   apiKey: string,
@@ -22,7 +23,7 @@ async function callGemini(
   if (tools && tools.length > 0) body.tools = tools;
   if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
 
-  console.log(`Calling Gemini model: ${model}, tools: ${tools?.length || 0}`);
+  console.log(`Calling Gemini model: ${model}, tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : 'none'}`);
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -102,24 +103,37 @@ serve(async (req) => {
       ? `Focus on these categories: ${targetCategories.map((id: string) => categories.find((c) => c.id === id)?.name || id).join(", ")}`
       : "Cover a variety of categories";
 
-    console.log("Auto-discover: Finding trending topics with Google Search, count:", count);
+    console.log("Auto-discover: Finding trending topics with Google Search grounding, count:", count);
 
-    // Step 1: Search the web for trending topics (Google Search grounding only)
+    // Step 1: Search the web for trending topics (Google Search grounding - NO function calling)
     const searchSystemPrompt = `You are a content strategist for DigitalHelp, a tech help website for non-technical users.
 Search the web to find what tech topics people are currently struggling with and searching for help on.
 Focus on: common tech problems, recent software/device updates, digital literacy gaps, and frequently asked questions.
-${targetCatFilter}`;
+${targetCatFilter}
 
-    const searchResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-      { role: "user", parts: [{ text: `Search the web and discover ${count} trending tech help topics that would attract organic search traffic. Look at what people are actually searching for and asking about right now.` }] }
+Provide a detailed list of ${count} specific, actionable topics that would make great help articles. For each topic include:
+- The specific question or problem
+- Why it's trending or important right now
+- Which category it fits best
+- Related search keywords`;
+
+    const searchResp = await callGemini(GEMINI_API_KEY, MODEL_RESEARCH, [
+      { role: "user", parts: [{ text: `Search the web and discover ${count} trending tech help topics that would attract organic search traffic. Look at what people are actually searching for and asking about right now. Be specific and actionable.` }] }
     ], [
-      { googleSearch: {} }
+      { google_search: {} }
     ], searchSystemPrompt);
 
     const searchResults = extractText(searchResp);
     console.log("Search results length:", searchResults.length);
 
-    // Step 2: Parse search results into structured topics (function calling only, no Google Search)
+    if (!searchResults || searchResults.length < 50) {
+      console.error("Google Search returned insufficient results");
+      return new Response(JSON.stringify({ topics: [], error: "Google Search returned no results" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Step 2: Parse search results into structured topics (function calling ONLY, NO google_search)
     const parseSystemPrompt = `You are a content strategist. Based on the web research below, extract exactly ${count} specific, actionable tech help topic suggestions.
 
 AVAILABLE CATEGORIES:
@@ -133,11 +147,11 @@ ${searchResults}
 
 Each topic must be specific and actionable (not vague). Match each to the best category. You MUST respond using the discover_topics function.`;
 
-    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-      { role: "user", parts: [{ text: `Based on the research, give me exactly ${count} topic suggestions as structured data.` }] }
+    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_PARSE, [
+      { role: "user", parts: [{ text: `Based on the research, give me exactly ${count} topic suggestions as structured data using the discover_topics function.` }] }
     ], [
       {
-        functionDeclarations: [{
+        function_declarations: [{
           name: "discover_topics",
           description: "Return discovered topic suggestions",
           parameters: {
@@ -180,6 +194,7 @@ Each topic must be specific and actionable (not vague). Match each to the best c
     if (result.topics.length === 0) {
       const text = extractText(parseResp);
       console.log("No function call returned, text response length:", text.length);
+      console.log("Parse response candidates:", JSON.stringify(parseResp.candidates?.[0]?.content?.parts?.map((p: Record<string, unknown>) => Object.keys(p))));
     }
 
     console.log("Auto-discover: Found", result.topics?.length, "topics");
@@ -188,7 +203,7 @@ Each topic must be specific and actionable (not vague). Match each to the best c
     await db.from("agent_logs").insert({
       action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)`,
       status: "completed",
-      details: { topics: result.topics, mode: "auto_discover", model: MODEL_FLASH },
+      details: { topics: result.topics, mode: "auto_discover", models: { research: MODEL_RESEARCH, parse: MODEL_PARSE } },
     });
 
     return new Response(JSON.stringify(result), {
