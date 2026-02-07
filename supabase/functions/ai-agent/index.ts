@@ -10,8 +10,8 @@ const corsHeaders = {
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // ── Models ────────────────────────────────────────────────────────────
-const MODEL_FLASH = "gemini-2.5-flash-preview-05-20";
-const MODEL_PRO = "gemini-2.5-pro-preview-05-06";
+const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_PRO = "gemini-2.5-pro";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ async function authenticateAdmin(req: Request) {
 
   const userClient = createClient(
     Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_PUBLISHABLE_KEY")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
     { global: { headers: { Authorization: authHeader } } }
   );
   const { data: { user }, error } = await userClient.auth.getUser();
@@ -324,17 +324,24 @@ async function step5_factCheck(
 
   await delay(3000); // Rate limit delay
 
-  const systemPrompt = `You are a fact-checker. Extract 3-5 key factual claims from this article and verify each one using Google Search. For each claim, determine if it's accurate, inaccurate, or unverifiable.
-
-Return your results using the fact_check function.`;
-
   const content = article.content as string;
   const title = article.title as string;
 
-  const response = await callGemini(apiKey, MODEL_FLASH, [
-    { role: "user", parts: [{ text: `Fact-check this article:\n\nTitle: ${title}\n\nContent:\n${content.substring(0, 5000)}` }] }
+  // Step 5a: Search the web to verify claims (Google Search only)
+  const searchResponse = await callGemini(apiKey, MODEL_FLASH, [
+    { role: "user", parts: [{ text: `Verify the key factual claims in this article by searching the web:\n\nTitle: ${title}\n\nContent:\n${content.substring(0, 5000)}\n\nExtract 3-5 key claims and check if they are accurate based on current web information. List each claim and whether it's verified or not.` }] }
   ], [
-    { googleSearch: {} },
+    { googleSearch: {} }
+  ], "You are a fact-checker. Verify claims using Google Search and report which are accurate and which are not.");
+
+  const verificationText = extractText(searchResponse);
+
+  await delay(2000);
+
+  // Step 5b: Parse verification results into structured data (function calling only)
+  const parseResponse = await callGemini(apiKey, MODEL_FLASH, [
+    { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
+  ], [
     {
       functionDeclarations: [{
         name: "fact_check",
@@ -351,11 +358,10 @@ Return your results using the fact_check function.`;
         }
       }]
     }
-  ], systemPrompt);
+  ], "Parse the fact-check results into a structured format. Return using the fact_check function.");
 
-  const args = extractFunctionCall(response);
+  const args = extractFunctionCall(parseResponse);
   if (!args) {
-    // If no function call, try to extract score from text
     return { factualScore: 7, verifiedClaims: [], flaggedClaims: [] };
   }
 

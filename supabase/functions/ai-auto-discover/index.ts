@@ -8,7 +8,41 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash-preview-05-20";
+const MODEL_FLASH = "gemini-2.5-flash";
+
+async function callGemini(
+  apiKey: string,
+  model: string,
+  contents: unknown[],
+  tools?: unknown[],
+  systemInstruction?: string
+) {
+  const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
+  const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.8 } };
+  if (tools && tools.length > 0) body.tools = tools;
+  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+
+  console.log(`Calling Gemini model: ${model}, tools: ${tools?.length || 0}`);
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error("Gemini API error:", resp.status, txt);
+    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Try again later." };
+    throw new Error(`Gemini API returned ${resp.status}`);
+  }
+  return resp.json();
+}
+
+function extractText(response: Record<string, unknown>): string {
+  const candidates = response.candidates as { content: { parts: { text?: string }[] } }[];
+  if (!candidates?.[0]?.content?.parts) return "";
+  return candidates[0].content.parts.map(p => p.text || "").join("");
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -31,7 +65,7 @@ serve(async (req) => {
       });
     }
 
-    const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_PUBLISHABLE_KEY")!, {
+    const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
       global: { headers: { Authorization: authHeader } },
     });
     const { data: { user }, error: userError } = await userClient.auth.getUser();
@@ -70,7 +104,23 @@ serve(async (req) => {
 
     console.log("Auto-discover: Finding trending topics with Google Search, count:", count);
 
-    const systemPrompt = `You are a content strategist for DigitalHelp, a tech help website for non-technical users.
+    // Step 1: Search the web for trending topics (Google Search grounding only)
+    const searchSystemPrompt = `You are a content strategist for DigitalHelp, a tech help website for non-technical users.
+Search the web to find what tech topics people are currently struggling with and searching for help on.
+Focus on: common tech problems, recent software/device updates, digital literacy gaps, and frequently asked questions.
+${targetCatFilter}`;
+
+    const searchResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+      { role: "user", parts: [{ text: `Search the web and discover ${count} trending tech help topics that would attract organic search traffic. Look at what people are actually searching for and asking about right now.` }] }
+    ], [
+      { googleSearch: {} }
+    ], searchSystemPrompt);
+
+    const searchResults = extractText(searchResp);
+    console.log("Search results length:", searchResults.length);
+
+    // Step 2: Parse search results into structured topics (function calling only, no Google Search)
+    const parseSystemPrompt = `You are a content strategist. Based on the web research below, extract exactly ${count} specific, actionable tech help topic suggestions.
 
 AVAILABLE CATEGORIES:
 ${categoryList}
@@ -78,84 +128,45 @@ ${categoryList}
 EXISTING ARTICLES (avoid duplicates):
 ${existingTitles || "(none yet)"}
 
-${targetCatFilter}
+WEB RESEARCH RESULTS:
+${searchResults}
 
-Your job: Discover ${count} trending, high-demand tech help topics that would attract organic search traffic.
+Each topic must be specific and actionable (not vague). Match each to the best category. You MUST respond using the discover_topics function.`;
 
-Think about:
-- Common tech problems people search for RIGHT NOW (2024-2026)
-- Seasonal tech issues (new device setups, software updates, etc.)
-- Evergreen digital literacy topics beginners always struggle with
-- Problems that get asked repeatedly on Reddit, forums, and support sites
-- Topics with high search volume but low competition
-
-Each topic should be specific and actionable (not vague like "how to use a computer").
-
-Use Google Search to find what people are currently searching for and struggling with.
-
-You MUST respond using the discover_topics function.`;
-
-    const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${GEMINI_API_KEY}`;
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: `Discover ${count} trending tech help topics that would be valuable for our audience. Search the web to find what people are actually looking for right now.` }] }
-        ],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        tools: [
-          { googleSearch: {} },
-          {
-            functionDeclarations: [{
-              name: "discover_topics",
-              description: "Return discovered topic suggestions",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  topics: {
-                    type: "ARRAY",
-                    items: {
-                      type: "OBJECT",
-                      properties: {
-                        topic: { type: "STRING", description: "The specific topic/question to write about" },
-                        category_id: { type: "STRING", description: "Best matching category UUID" },
-                        priority: { type: "STRING", description: "Priority: high, medium, or low" },
-                        reasoning: { type: "STRING", description: "Why this topic is valuable right now" },
-                        search_keywords: { type: "ARRAY", items: { type: "STRING" }, description: "Related search keywords" },
-                      },
-                      required: ["topic", "category_id", "priority", "reasoning"]
-                    }
-                  }
-                },
-                required: ["topics"]
+    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+      { role: "user", parts: [{ text: `Based on the research, give me exactly ${count} topic suggestions as structured data.` }] }
+    ], [
+      {
+        functionDeclarations: [{
+          name: "discover_topics",
+          description: "Return discovered topic suggestions",
+          parameters: {
+            type: "OBJECT",
+            properties: {
+              topics: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    topic: { type: "STRING", description: "The specific topic/question to write about" },
+                    category_id: { type: "STRING", description: "Best matching category UUID" },
+                    priority: { type: "STRING", description: "Priority: high, medium, or low" },
+                    reasoning: { type: "STRING", description: "Why this topic is valuable right now" },
+                    search_keywords: { type: "ARRAY", items: { type: "STRING" }, description: "Related search keywords" },
+                  },
+                  required: ["topic", "category_id", "priority", "reasoning"]
+                }
               }
-            }]
+            },
+            required: ["topics"]
           }
-        ],
-        generationConfig: { temperature: 0.8 },
-      }),
-    });
-
-    if (!resp.ok) {
-      const txt = await resp.text();
-      console.error("Gemini API error:", resp.status, txt);
-      if (resp.status === 429) {
-        return new Response(JSON.stringify({ error: "Rate limit exceeded. Try again later." }), {
-          status: 429,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        }]
       }
-      throw new Error(`Gemini API returned ${resp.status}`);
-    }
+    ], parseSystemPrompt);
 
-    const data = await resp.json();
-
-    // Extract function call from Gemini response
-    const candidates = data.candidates;
+    // Extract function call
     let result: { topics: unknown[] } = { topics: [] };
-
+    const candidates = parseResp.candidates;
     if (candidates?.[0]?.content?.parts) {
       for (const part of candidates[0].content.parts) {
         if (part.functionCall?.name === "discover_topics") {
@@ -165,11 +176,10 @@ You MUST respond using the discover_topics function.`;
       }
     }
 
-    // If no function call, try to extract from text
+    // If no function call, try to parse from text
     if (result.topics.length === 0) {
-      const text = candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") || "";
+      const text = extractText(parseResp);
       console.log("No function call returned, text response length:", text.length);
-      // Return empty topics rather than fail
     }
 
     console.log("Auto-discover: Found", result.topics?.length, "topics");
@@ -188,8 +198,9 @@ You MUST respond using the discover_topics function.`;
   } catch (error) {
     console.error("Auto-discover error:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
+    const status = (error as { status?: number })?.status || 500;
     return new Response(JSON.stringify({ error: message }), {
-      status: 500,
+      status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
