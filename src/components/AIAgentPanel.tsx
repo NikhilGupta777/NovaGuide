@@ -94,6 +94,7 @@ export default function AIAgentPanel() {
   const [discovering, setDiscovering] = useState(false);
   const [discoverCount, setDiscoverCount] = useState(5);
   const [autoMake, setAutoMake] = useState(false);
+  const [autoPublish, setAutoPublish] = useState(false);
 
   // Batch
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
@@ -256,6 +257,15 @@ export default function AIAgentPanel() {
           console.log(`Batch item ${i} skipped: ${data.reason}`);
         } else {
           successCount++;
+          // Auto-publish if toggle is on
+          const articleId = data?.id;
+          if (autoPublish && articleId) {
+            await supabase.from("articles").update({
+              status: "published",
+              published_at: new Date().toISOString(),
+            }).eq("id", articleId);
+            console.log(`Auto-published article: ${articleId}`);
+          }
         }
       } catch (err) {
         console.error(`Batch item ${i} failed:`, err);
@@ -459,6 +469,17 @@ export default function AIAgentPanel() {
                     <Switch
                       checked={autoMake}
                       onCheckedChange={setAutoMake}
+                      disabled={isAnyOperationRunning}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
+                    <div className="flex-1 min-w-0 mr-3">
+                      <p className="text-sm font-medium text-foreground">Auto-Publish</p>
+                      <p className="text-xs text-muted-foreground">Publish articles immediately after generation</p>
+                    </div>
+                    <Switch
+                      checked={autoPublish}
+                      onCheckedChange={setAutoPublish}
                       disabled={isAnyOperationRunning}
                     />
                   </div>
