@@ -8,8 +8,8 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash-preview-05-20";
-const MODEL_PRO = "gemini-2.5-pro-preview-05-06";
+const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_PRO = "gemini-2.5-pro";
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -266,14 +266,23 @@ serve(async (req) => {
 
         await delay(3000);
 
-        // Fact check
+        // Fact check - Step 5a: Search web to verify (Google Search only)
         await db.from("agent_runs").update({ status: "verifying", current_step: 5 }).eq("id", runId);
-        const factResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-          { role: "user", parts: [{ text: `Fact-check this article:\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}` }] }
+        const factSearchResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+          { role: "user", parts: [{ text: `Verify the key factual claims in this article by searching the web:\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}\n\nList each claim and whether it's verified or not.` }] }
         ], [
-          { googleSearch: {} },
+          { googleSearch: {} }
+        ], "Fact-check the key claims using web search.");
+        const verificationText = extractText(factSearchResp);
+        
+        await delay(2000);
+        
+        // Step 5b: Parse into score (function calling only)
+        const factResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+          { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
+        ], [
           { functionDeclarations: [{ name: "fact_check", parameters: { type: "OBJECT", properties: { factual_score: { type: "NUMBER" } }, required: ["factual_score"] } }] }
-        ], "Fact-check the key claims. Return a factual_score 0-10.");
+        ], "Parse the fact-check results. Return a factual_score 0-10 using the fact_check function.");
         const factArgs = extractFunctionCall(factResp);
         const factualScore = Math.round((factArgs?.factual_score as number) || 7);
         await db.from("agent_runs").update({ factual_score: factualScore }).eq("id", runId);
