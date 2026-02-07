@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useCategories, useAllArticles } from "@/hooks/useDatabase";
@@ -98,6 +98,7 @@ export default function AIAgentPanel() {
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
+  const batchAbortRef = useRef(false);
 
   // Automation
   const [autoSettings, setAutoSettings] = useState<AutoSettings | null>(null);
@@ -111,6 +112,9 @@ export default function AIAgentPanel() {
   const [runsLimit, setRunsLimit] = useState(7);
   const [hasMoreRuns, setHasMoreRuns] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+
+  // Derived: any AI operation is active
+  const isAnyOperationRunning = generating || discovering || batchRunning;
 
   // Load recent pipeline runs
   const fetchRuns = useCallback(async (limit = runsLimit) => {
@@ -169,12 +173,17 @@ export default function AIAgentPanel() {
       toast({ title: "Error", description: "Enter a topic.", variant: "destructive" });
       return;
     }
+    if (isAnyOperationRunning) {
+      toast({ title: "Busy", description: "Another operation is running. Please wait.", variant: "destructive" });
+      return;
+    }
     setGenerating(true);
     try {
       const { data, error } = await supabase.functions.invoke("ai-agent", {
         body: { topic: t, categoryId: catId || categoryId || undefined, mode: "manual" },
       });
       if (error) throw error;
+      if (data?.error) throw new Error(data.error);
 
       if (data.skipped) {
         toast({ title: "Topic Skipped", description: data.reason, variant: "destructive" });
@@ -224,28 +233,54 @@ export default function AIAgentPanel() {
   // Core batch runner (reusable for auto-make and manual batch)
   const runBatch = async (items: DiscoveredTopic[]) => {
     if (items.length === 0) return;
+    batchAbortRef.current = false;
     setBatchRunning(true);
     setBatchProgress(0);
+    let successCount = 0;
+    let failCount = 0;
     for (let i = 0; i < items.length; i++) {
+      if (batchAbortRef.current) {
+        toast({ title: "Batch Stopped", description: `Stopped after ${successCount} articles. ${items.length - i} remaining skipped.` });
+        break;
+      }
       const item = items[i];
       setBatchProgress(i + 1);
       try {
-        await supabase.functions.invoke("ai-agent", {
+        const { data, error } = await supabase.functions.invoke("ai-agent", {
           body: { topic: item.topic, categoryId: item.category_id, mode: "batch" },
         });
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        if (data?.skipped) {
+          console.log(`Batch item ${i} skipped: ${data.reason}`);
+        } else {
+          successCount++;
+        }
       } catch (err) {
         console.error(`Batch item ${i} failed:`, err);
+        failCount++;
       }
-      if (i < items.length - 1) {
+      if (i < items.length - 1 && !batchAbortRef.current) {
         await new Promise(r => setTimeout(r, 5000));
       }
     }
-    toast({ title: "Batch Complete!", description: `Generated ${items.length} articles as drafts.` });
+    if (!batchAbortRef.current) {
+      toast({
+        title: "Batch Complete!",
+        description: `${successCount} articles generated, ${failCount} failed.`,
+      });
+    }
     setBatchQueue([]);
     setBatchRunning(false);
     setBatchProgress(0);
+    batchAbortRef.current = false;
     refetchArticles();
     fetchRuns();
+  };
+
+  const handleStopBatch = () => {
+    batchAbortRef.current = true;
+    toast({ title: "Stopping...", description: "Will stop after the current article finishes." });
   };
 
   // Batch generate (manual trigger)
@@ -349,7 +384,7 @@ export default function AIAgentPanel() {
                       onKeyDown={(e) => e.key === "Enter" && !generating && handleGenerate()}
                       placeholder="e.g., How to transfer WhatsApp chats to a new phone"
                       className="w-full px-3 py-2.5 rounded-lg border border-input bg-background text-foreground text-sm outline-none focus:ring-2 focus:ring-ring"
-                      disabled={generating}
+                      disabled={isAnyOperationRunning}
                     />
                   </div>
                   <div>
@@ -358,7 +393,7 @@ export default function AIAgentPanel() {
                       value={categoryId}
                       onChange={(e) => setCategoryId(e.target.value)}
                       className="w-full px-3 py-2.5 rounded-lg border border-input bg-background text-foreground text-sm outline-none"
-                      disabled={generating}
+                      disabled={isAnyOperationRunning}
                     >
                       <option value="">Auto-detect category</option>
                       {categories.map((cat) => (
@@ -368,7 +403,7 @@ export default function AIAgentPanel() {
                   </div>
                   <button
                     onClick={() => handleGenerate()}
-                    disabled={generating || !topic.trim()}
+                    disabled={isAnyOperationRunning || !topic.trim()}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
                     {generating ? (
@@ -419,12 +454,12 @@ export default function AIAgentPanel() {
                     <Switch
                       checked={autoMake}
                       onCheckedChange={setAutoMake}
-                      disabled={discovering || batchRunning}
+                      disabled={isAnyOperationRunning}
                     />
                   </div>
                   <button
                     onClick={handleDiscover}
-                    disabled={discovering || batchRunning}
+                    disabled={isAnyOperationRunning}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
                   >
                     {discovering ? (
@@ -473,7 +508,7 @@ export default function AIAgentPanel() {
                           <div className="flex gap-1 flex-shrink-0">
                             <button
                               onClick={() => handleGenerate(t.topic, t.category_id)}
-                              disabled={generating}
+                              disabled={isAnyOperationRunning}
                               className="p-1.5 rounded-md hover:bg-primary/10 text-primary transition-colors"
                               title="Generate now"
                             >
@@ -550,23 +585,34 @@ export default function AIAgentPanel() {
                   </div>
                 )}
 
-                <button
-                  onClick={handleBatchGenerate}
-                  disabled={batchRunning || batchQueue.length === 0}
-                  className="w-full mt-4 flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors disabled:opacity-50"
-                >
-                  {batchRunning ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Generating {batchProgress}/{batchQueue.length}...
-                    </>
-                  ) : (
-                    <>
-                      <Rocket className="h-4 w-4" />
-                      Generate All ({batchQueue.length} articles)
-                    </>
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={handleBatchGenerate}
+                    disabled={batchRunning || batchQueue.length === 0 || isAnyOperationRunning}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors disabled:opacity-50"
+                  >
+                    {batchRunning ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Generating {batchProgress}/{batchQueue.length}...
+                      </>
+                    ) : (
+                      <>
+                        <Rocket className="h-4 w-4" />
+                        Generate All ({batchQueue.length})
+                      </>
+                    )}
+                  </button>
+                  {batchRunning && (
+                    <button
+                      onClick={handleStopBatch}
+                      className="flex items-center justify-center gap-2 px-4 py-2.5 bg-destructive text-destructive-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+                    >
+                      <StopCircle className="h-4 w-4" />
+                      Stop
+                    </button>
                   )}
-                </button>
+                </div>
               </div>
             </TabsContent>
 
