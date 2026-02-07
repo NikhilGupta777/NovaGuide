@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.ai-auto-discover]
 verify_jwt = false
+
+[functions.ai-scheduled-runner]
+verify_jwt = false
