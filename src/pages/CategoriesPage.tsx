@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Loader2 } from "lucide-react";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import CategoryCard from "@/components/CategoryCard";
 import { useCategories } from "@/hooks/useDatabase";
 
@@ -9,6 +10,7 @@ const CategoriesPage = () => {
 
   return (
     <Layout>
+      <SEOHead title="All Categories" description="Browse all help categories — phones, tablets, computers, apps, YouTube, social media, and more." />
       <div className="container py-8">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
           <h1 className="text-3xl font-bold text-foreground mb-2">All Categories</h1>

@@ -1,5 +1,8 @@
-import { useLocation } from "react-router-dom";
+import { useLocation, Link } from "react-router-dom";
 import { useEffect } from "react";
+import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
+import { SearchX } from "lucide-react";
 
 const NotFound = () => {
   const location = useLocation();
@@ -9,15 +12,22 @@ const NotFound = () => {
   }, [location.pathname]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-muted">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">404</h1>
-        <p className="mb-4 text-xl text-muted-foreground">Oops! Page not found</p>
-        <a href="/" className="text-primary underline hover:text-primary/90">
-          Return to Home
-        </a>
+    <Layout>
+      <SEOHead title="Page Not Found" noIndex />
+      <div className="container py-20 text-center max-w-lg mx-auto">
+        <SearchX className="h-16 w-16 text-muted-foreground mx-auto mb-6" />
+        <h1 className="text-4xl font-bold text-foreground mb-3">404</h1>
+        <p className="text-lg text-muted-foreground mb-6">
+          The page you're looking for doesn't exist or has been moved.
+        </p>
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-medium hover:opacity-90 transition-opacity"
+        >
+          Go back home
+        </Link>
       </div>
-    </div>
+    </Layout>
   );
 };
 

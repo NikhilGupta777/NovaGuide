@@ -2,6 +2,7 @@ import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Loader2 } from "lucide-react";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import BreadcrumbNav from "@/components/BreadcrumbNav";
 import ArticleCard from "@/components/ArticleCard";
 import AdPlaceholder from "@/components/AdPlaceholder";
@@ -41,6 +42,7 @@ const CategoryPage = () => {
 
   return (
     <Layout>
+      <SEOHead title={category.name} description={category.description || `Browse ${category.name} guides and tutorials on DigitalHelp.`} />
       <div className="container py-8">
         <BreadcrumbNav items={[{ label: category.name }]} />
 

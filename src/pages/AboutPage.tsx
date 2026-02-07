@@ -1,10 +1,12 @@
 import { motion } from "framer-motion";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import { BookOpen, Users, Zap, Globe } from "lucide-react";
 
 const AboutPage = () => {
   return (
     <Layout>
+      <SEOHead title="About" description="DigitalHelp is a free knowledge hub with clear, beginner-friendly step-by-step tech guides for phones, computers, apps, and more." />
       <div className="container py-12 max-w-3xl">
         <motion.div
           initial={{ opacity: 0, y: 20 }}

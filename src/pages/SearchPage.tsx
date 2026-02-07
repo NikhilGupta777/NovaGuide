@@ -2,6 +2,7 @@ import { useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Loader2, SearchX } from "lucide-react";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import BreadcrumbNav from "@/components/BreadcrumbNav";
 import ArticleCard from "@/components/ArticleCard";
 import SearchBar from "@/components/SearchBar";
@@ -16,6 +17,7 @@ const SearchPage = () => {
 
   return (
     <Layout>
+      <SEOHead title={query ? `Search: ${query}` : "Search"} description={`Search results for "${query}" on DigitalHelp`} noIndex />
       <div className="container py-8">
         <BreadcrumbNav items={[{ label: `Search: "${query}"` }]} />
 

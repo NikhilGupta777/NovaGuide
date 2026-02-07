@@ -2,7 +2,9 @@ import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Clock, Calendar, Tag, ArrowLeft, Loader2 } from "lucide-react";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import BreadcrumbNav from "@/components/BreadcrumbNav";
+import MarkdownRenderer from "@/components/MarkdownRenderer";
 import ArticleCard from "@/components/ArticleCard";
 import AdPlaceholder from "@/components/AdPlaceholder";
 import { useArticleBySlug, useArticlesByCategory, useCategories } from "@/hooks/useDatabase";
@@ -30,6 +32,7 @@ const ArticlePage = () => {
   if (!article) {
     return (
       <Layout>
+        <SEOHead title="Article Not Found" noIndex />
         <div className="container py-16 text-center">
           <h1 className="text-2xl font-bold text-foreground mb-2">Article Not Found</h1>
           <p className="text-muted-foreground mb-4">The article you're looking for doesn't exist.</p>
@@ -41,60 +44,31 @@ const ArticlePage = () => {
 
   const related = relatedArticles.filter((a) => a.id !== article.id).slice(0, 3);
 
-  const renderContent = (content: string) => {
-    const lines = content.split("\n");
-    const elements: React.ReactNode[] = [];
-    let inCodeBlock = false;
-    let codeContent = "";
-
-    lines.forEach((line, index) => {
-      if (line.startsWith("```")) {
-        if (inCodeBlock) {
-          elements.push(
-            <pre key={`code-${index}`} className="bg-muted rounded-lg p-4 overflow-x-auto mb-4 text-sm font-mono">
-              <code>{codeContent.trim()}</code>
-            </pre>
-          );
-          codeContent = "";
-          inCodeBlock = false;
-        } else {
-          inCodeBlock = true;
-        }
-        return;
-      }
-      if (inCodeBlock) { codeContent += line + "\n"; return; }
-      if (line.startsWith("## ")) {
-        elements.push(<h2 key={index} className="text-2xl font-bold mt-8 mb-4 text-foreground">{line.replace("## ", "")}</h2>);
-      } else if (line.startsWith("### ")) {
-        elements.push(<h3 key={index} className="text-xl font-semibold mt-6 mb-3 text-foreground">{line.replace("### ", "")}</h3>);
-      } else if (line.trim() === "") {
-        // skip
-      } else {
-        const parts = line.split(/(\*\*[^*]+\*\*)/g);
-        const rendered = parts.map((part, i) => {
-          if (part.startsWith("**") && part.endsWith("**")) {
-            return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
-          }
-          const codeParts = part.split(/(`[^`]+`)/g);
-          return codeParts.map((cp, j) => {
-            if (cp.startsWith("`") && cp.endsWith("`")) {
-              return <code key={`${i}-${j}`} className="px-1.5 py-0.5 bg-muted rounded text-sm font-mono">{cp.slice(1, -1)}</code>;
-            }
-            return cp;
-          });
-        });
-        if (line.startsWith("- ")) {
-          elements.push(<li key={index} className="ml-6 mb-2 text-foreground list-disc">{rendered.flat().slice(1)}</li>);
-        } else {
-          elements.push(<p key={index} className="mb-4 text-foreground leading-relaxed">{rendered}</p>);
-        }
-      }
-    });
-    return elements;
+  // JSON-LD structured data
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    headline: article.title,
+    description: article.excerpt,
+    datePublished: article.published_at,
+    dateModified: article.updated_at,
+    author: { "@type": "Organization", name: "DigitalHelp" },
+    publisher: { "@type": "Organization", name: "DigitalHelp" },
+    mainEntityOfPage: { "@type": "WebPage" },
   };
 
   return (
     <Layout>
+      <SEOHead
+        title={article.seo_title || article.title}
+        description={article.seo_description || article.excerpt || ""}
+        type="article"
+        publishedTime={article.published_at || undefined}
+        modifiedTime={article.updated_at}
+        tags={article.tags || undefined}
+      />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+
       <article className="container py-8">
         <BreadcrumbNav
           items={[
@@ -106,7 +80,7 @@ const ArticlePage = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2">
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
-              <div className="mb-8">
+              <header className="mb-8">
                 {category && colors && (
                   <Link to={`/category/${category.slug}`} className={`category-badge ${colors.bg} ${colors.color} mb-3 inline-flex`}>
                     {category.name}
@@ -123,10 +97,10 @@ const ArticlePage = () => {
                     </span>
                   )}
                 </div>
-              </div>
+              </header>
 
               <div className="border-t border-border pt-8" />
-              <div className="prose-article">{article.content && renderContent(article.content)}</div>
+              {article.content && <MarkdownRenderer content={article.content} />}
 
               <div className="my-8"><AdPlaceholder type="inline" className="max-w-md mx-auto" /></div>
 
@@ -148,14 +122,14 @@ const ArticlePage = () => {
               </div>
 
               {related.length > 0 && (
-                <div className="mt-12 pt-8 border-t border-border">
+                <section className="mt-12 pt-8 border-t border-border">
                   <h3 className="text-xl font-bold text-foreground mb-4">Related Articles</h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     {related.map((ra) => (
                       <ArticleCard key={ra.id} article={ra} categories={categories} />
                     ))}
                   </div>
-                </div>
+                </section>
               )}
             </motion.div>
           </div>
