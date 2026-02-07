@@ -804,8 +804,10 @@ serve(async (req) => {
 
     console.log(`Nightly Builder triggered for batch ${batch}`);
 
-    // Use background execution for long-running task
-    EdgeRuntime.waitUntil(runNightlyBuilder(batch));
+    // Run in background - fire and forget
+    runNightlyBuilder(batch).catch((e) =>
+      console.error("Nightly builder background error:", e)
+    );
 
     return jsonResp({
       success: true,
