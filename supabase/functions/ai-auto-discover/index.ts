@@ -9,7 +9,7 @@ const corsHeaders = {
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODEL_RESEARCH = "gemini-2.5-flash"; // Stable grounding model
-const MODEL_PARSE = "gemini-2.5-flash-lite"; // Cheap parsing model
+const MODEL_PARSE = "gemini-2.5-flash"; // Reliable function calling model
 
 async function callGemini(
   apiKey: string,
@@ -147,9 +147,7 @@ ${searchResults}
 
 Each topic must be specific and actionable (not vague). Match each to the best category. You MUST respond using the discover_topics function.`;
 
-    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_PARSE, [
-      { role: "user", parts: [{ text: `Based on the research, give me exactly ${count} topic suggestions as structured data using the discover_topics function.` }] }
-    ], [
+    const parseTools = [
       {
         function_declarations: [{
           name: "discover_topics",
@@ -176,25 +174,53 @@ Each topic must be specific and actionable (not vague). Match each to the best c
           }
         }]
       }
-    ], parseSystemPrompt);
+    ];
 
-    // Extract function call
+    const parseUserMsg = `Based on the research, give me exactly ${count} topic suggestions as structured data using the discover_topics function.`;
+
+    // Try up to 2 times for function calling
     let result: { topics: unknown[] } = { topics: [] };
-    const candidates = parseResp.candidates;
-    if (candidates?.[0]?.content?.parts) {
-      for (const part of candidates[0].content.parts) {
-        if (part.functionCall?.name === "discover_topics") {
-          result = part.functionCall.args;
-          break;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const parseResp = await callGemini(GEMINI_API_KEY, MODEL_PARSE, [
+        { role: "user", parts: [{ text: parseUserMsg }] }
+      ], parseTools, parseSystemPrompt);
+
+      // Try to extract function call
+      const candidates = parseResp.candidates;
+      if (candidates?.[0]?.content?.parts) {
+        for (const part of candidates[0].content.parts) {
+          if (part.functionCall?.name === "discover_topics") {
+            result = part.functionCall.args;
+            break;
+          }
         }
       }
-    }
 
-    // If no function call, try to parse from text
-    if (result.topics.length === 0) {
+      if (result.topics.length > 0) break;
+
+      // Fallback: try to extract JSON from text response
       const text = extractText(parseResp);
-      console.log("No function call returned, text response length:", text.length);
-      console.log("Parse response candidates:", JSON.stringify(parseResp.candidates?.[0]?.content?.parts?.map((p: Record<string, unknown>) => Object.keys(p))));
+      console.log(`Attempt ${attempt + 1}: No function call, text length: ${text.length}`);
+      if (text.length > 0) {
+        try {
+          const jsonMatch = text.match(/\{[\s\S]*"topics"[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (parsed.topics && Array.isArray(parsed.topics) && parsed.topics.length > 0) {
+              result = parsed;
+              console.log("Extracted topics from text fallback:", result.topics.length);
+              break;
+            }
+          }
+        } catch (e) {
+          console.log("Could not parse JSON from text response");
+        }
+      }
+
+      if (attempt === 0) {
+        console.log("Retrying parse step...");
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
 
     console.log("Auto-discover: Found", result.topics?.length, "topics");
