@@ -10,6 +10,7 @@ import {
   ChevronDown, Search
 } from "lucide-react";
 import type { Tables } from "@/integrations/supabase/types";
+import AIAgentPanel from "@/components/AIAgentPanel";
 
 type DbArticle = Tables<"articles">;
 
@@ -20,10 +21,6 @@ const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState<"articles" | "agent">("articles");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [agentTopic, setAgentTopic] = useState("");
-  const [agentCategory, setAgentCategory] = useState("");
-  const [agentLogs, setAgentLogs] = useState<Tables<"agent_logs">[]>([]);
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -32,19 +29,6 @@ const AdminDashboard = () => {
       navigate("/auth");
     }
   }, [user, authLoading, navigate]);
-
-  useEffect(() => {
-    if (isAdmin) {
-      supabase
-        .from("agent_logs")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(20)
-        .then(({ data }) => {
-          if (data) setAgentLogs(data);
-        });
-    }
-  }, [isAdmin]);
 
   if (authLoading) {
     return (
@@ -95,44 +79,6 @@ const AdminDashboard = () => {
     } else {
       toast({ title: "Updated", description: `Article ${newStatus === "published" ? "published" : "unpublished"}.` });
       refetch();
-    }
-  };
-
-  const handleRunAgent = async () => {
-    if (!agentTopic.trim()) {
-      toast({ title: "Error", description: "Please enter a topic for the agent.", variant: "destructive" });
-      return;
-    }
-    setAgentRunning(true);
-    try {
-      const { data, error } = await supabase.functions.invoke("ai-agent", {
-        body: {
-          topic: agentTopic.trim(),
-          categoryId: agentCategory || undefined,
-        },
-      });
-
-      if (error) throw error;
-
-      toast({
-        title: "Article Generated!",
-        description: `"${data.title}" saved as draft. Review it below.`,
-      });
-      setAgentTopic("");
-      refetch();
-
-      // Refresh agent logs
-      const { data: logs } = await supabase
-        .from("agent_logs")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(20);
-      if (logs) setAgentLogs(logs);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Agent failed";
-      toast({ title: "Agent Error", description: msg, variant: "destructive" });
-    } finally {
-      setAgentRunning(false);
     }
   };
 
@@ -303,7 +249,7 @@ const AdminDashboard = () => {
                               <div className="flex items-center justify-end gap-1">
                                 <button
                                   onClick={() => handleTogglePublish(article)}
-                                  title={article.status === "published" ? "Unpublish" : "Publish"}
+                                  title={article.status === "published" ? "Unpublish" : "Go Live"}
                                   className="p-1.5 rounded-md hover:bg-muted transition-colors"
                                 >
                                   {article.status === "published" ? (
@@ -344,90 +290,7 @@ const AdminDashboard = () => {
         )}
 
         {/* AI Agent Tab */}
-        {activeTab === "agent" && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Agent Controls */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <Bot className="h-5 w-5 text-primary" />
-                <h3 className="font-semibold text-foreground">Generate Article with AI</h3>
-              </div>
-              <p className="text-sm text-muted-foreground mb-4">
-                Enter a topic or question and the AI agent will research, write, and save a complete article as a draft.
-              </p>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">Topic / Question</label>
-                  <input
-                    type="text"
-                    value={agentTopic}
-                    onChange={(e) => setAgentTopic(e.target.value)}
-                    placeholder="e.g., How to fix Bluetooth not working on Android"
-                    className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">Category (optional)</label>
-                  <select
-                    value={agentCategory}
-                    onChange={(e) => setAgentCategory(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm outline-none"
-                  >
-                    <option value="">Auto-detect category</option>
-                    {categories.map((cat) => (
-                      <option key={cat.id} value={cat.id}>{cat.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <button
-                  onClick={handleRunAgent}
-                  disabled={agentRunning}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-                >
-                  {agentRunning ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Generating article...
-                    </>
-                  ) : (
-                    <>
-                      <Bot className="h-4 w-4" />
-                      Generate Article
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Agent Logs */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <h3 className="font-semibold text-foreground mb-4">Agent Activity Log</h3>
-              {agentLogs.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No agent activity yet. Generate your first article!</p>
-              ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {agentLogs.map((log) => (
-                    <div key={log.id} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50 text-sm">
-                      <div className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${
-                        log.status === "completed" ? "bg-cat-howto" :
-                        log.status === "failed" ? "bg-destructive" : "bg-cat-account"
-                      }`} />
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium text-foreground">{log.action}</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {new Date(log.created_at).toLocaleString()}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {activeTab === "agent" && <AIAgentPanel />}
       </div>
     </div>
   );

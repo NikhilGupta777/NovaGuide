@@ -7,6 +7,283 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const MODEL = "google/gemini-3-flash-preview";
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function serviceClient() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
+}
+
+async function authenticateAdmin(req: Request) {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) throw { status: 401, message: "Unauthorized" };
+
+  const userClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_PUBLISHABLE_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user }, error } = await userClient.auth.getUser();
+  if (error || !user) throw { status: 401, message: "Unauthorized" };
+
+  const db = serviceClient();
+  const { data: roleData } = await db
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", user.id)
+    .eq("role", "admin")
+    .maybeSingle();
+  if (!roleData) throw { status: 403, message: "Admin access required" };
+
+  return { user, db };
+}
+
+async function callAI(apiKey: string, messages: unknown[], tools?: unknown[], toolChoice?: unknown) {
+  const body: Record<string, unknown> = { model: MODEL, messages };
+  if (tools) body.tools = tools;
+  if (toolChoice) body.tool_choice = toolChoice;
+
+  const resp = await fetch(GATEWAY_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error("AI gateway error:", resp.status, txt);
+    if (resp.status === 429) throw { status: 429, message: "AI rate limit exceeded. Please try again later." };
+    if (resp.status === 402) throw { status: 402, message: "AI credits exhausted. Please add credits." };
+    throw new Error(`AI gateway returned ${resp.status}`);
+  }
+  return resp.json();
+}
+
+async function updateRunStatus(db: ReturnType<typeof serviceClient>, runId: string, status: string, step: number, extra: Record<string, unknown> = {}) {
+  await db.from("agent_runs").update({ status, current_step: step, ...extra }).eq("id", runId);
+}
+
+function jsonResp(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+// ── Pipeline Steps ──────────────────────────────────────────────────
+
+async function step1_research(apiKey: string, topic: string): Promise<{ research: string; sources: string[] }> {
+  console.log("Pipeline Step 1: Deep Research for:", topic);
+
+  const researchPrompt = `You are a world-class research analyst. Your job is to do deep research on a topic and produce comprehensive research notes.
+
+TOPIC: "${topic}"
+
+Produce thorough research notes covering:
+1. **Core Problem**: What exact problem does this topic address? Who faces it?
+2. **Key Solutions**: What are the main solutions/steps to solve this?
+3. **Common Mistakes**: What do people typically get wrong?
+4. **Platform/Device Specifics**: Are there differences across platforms (Windows, Mac, Android, iOS)?
+5. **Recent Changes**: Any recent updates (2024-2025) that affect this topic?
+6. **Expert Tips**: What do experts recommend that beginners miss?
+7. **Related Issues**: What related problems might users also face?
+
+You MUST respond using the research_notes function.`;
+
+  const data = await callAI(apiKey, [
+    { role: "system", content: researchPrompt },
+    { role: "user", content: `Research this topic thoroughly: "${topic}"` },
+  ], [
+    {
+      type: "function",
+      function: {
+        name: "research_notes",
+        description: "Return structured research notes",
+        parameters: {
+          type: "object",
+          properties: {
+            research_summary: { type: "string", description: "Comprehensive research notes in Markdown, 500-800 words" },
+            key_points: { type: "array", items: { type: "string" }, description: "5-10 key findings" },
+            sources_consulted: { type: "array", items: { type: "string" }, description: "Types of sources consulted (e.g., 'Official documentation', 'User forums', 'Tech blogs')" },
+            difficulty_level: { type: "string", enum: ["beginner", "intermediate", "advanced"], description: "Difficulty level of the topic" },
+            estimated_word_count: { type: "number", description: "Recommended article word count based on topic complexity" },
+          },
+          required: ["research_summary", "key_points", "sources_consulted", "difficulty_level"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ], { type: "function", function: { name: "research_notes" } });
+
+  const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+  if (!toolCall) throw new Error("AI did not return research notes");
+  const result = JSON.parse(toolCall.function.arguments);
+  return { research: result.research_summary, sources: result.sources_consulted };
+}
+
+async function step2_outline(apiKey: string, topic: string, research: string): Promise<string> {
+  console.log("Pipeline Step 2: Generate Outline");
+
+  const data = await callAI(apiKey, [
+    {
+      role: "system",
+      content: `You are an expert content strategist. Based on the research notes, create a detailed article outline.
+      
+The outline should follow this structure:
+1. Hook / Introduction (grab attention, state the problem)
+2. Why This Matters (brief context)
+3. Step-by-Step Solution (the main content, 4-8 steps)
+4. Troubleshooting / Common Issues
+5. Quick Summary / Recap
+6. Related Tips
+
+Return ONLY the outline as a numbered/nested Markdown list. Be specific about what each section should cover.`,
+    },
+    { role: "user", content: `Topic: "${topic}"\n\nResearch Notes:\n${research}\n\nCreate a detailed article outline.` },
+  ]);
+
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function step3_write(apiKey: string, topic: string, research: string, outline: string, categories: { id: string; name: string }[], categoryId?: string): Promise<Record<string, unknown>> {
+  console.log("Pipeline Step 3: Write Article");
+
+  const categoryList = categories.map((c) => `${c.name} (ID: ${c.id})`).join(", ");
+
+  const systemPrompt = `You are an expert tech writer for DigitalHelp, a beginner-friendly tech help website.
+You write clear, step-by-step guides that solve everyday digital problems.
+
+AVAILABLE CATEGORIES: ${categoryList}
+
+Use the research notes and outline below to write a complete, high-quality help article.
+
+RESEARCH NOTES:
+${research}
+
+ARTICLE OUTLINE:
+${outline}
+
+WRITING RULES:
+- Write for complete beginners with zero tech knowledge
+- Use simple, clear language — no jargon without explanation
+- Follow the outline structure exactly
+- Each step should be numbered with a clear heading
+- Use **bold** for UI elements, buttons, menu items
+- Include practical tips and warnings where needed
+- Keep paragraphs short (2-3 sentences max)
+- Article should be 800-1500 words for thorough coverage
+- Add a "💡 Pro Tip" or "⚠️ Warning" callout where relevant
+- End with a concise recap and next steps
+
+You MUST respond using the generate_article function.`;
+
+  const data = await callAI(apiKey, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: `Write the full article about: "${topic}"` },
+  ], [
+    {
+      type: "function",
+      function: {
+        name: "generate_article",
+        description: "Generate a structured help article with all required fields",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "SEO-friendly article title, clear and descriptive, under 70 chars" },
+            slug: { type: "string", description: "URL-friendly slug, lowercase with hyphens, no special chars" },
+            excerpt: { type: "string", description: "Brief 1-2 sentence summary for search results and previews" },
+            content: { type: "string", description: "Full article content in Markdown" },
+            category_id: { type: "string", description: "UUID of the best matching category" },
+            tags: { type: "array", items: { type: "string" }, description: "3-8 relevant tags" },
+            read_time: { type: "number", description: "Estimated reading time in minutes" },
+            seo_title: { type: "string", description: "SEO meta title under 60 characters" },
+            seo_description: { type: "string", description: "SEO meta description under 160 characters" },
+          },
+          required: ["title", "slug", "excerpt", "content", "category_id", "tags", "read_time", "seo_title", "seo_description"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ], { type: "function", function: { name: "generate_article" } });
+
+  const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+  if (!toolCall) throw new Error("AI did not return a structured article");
+  const article = JSON.parse(toolCall.function.arguments);
+  if (categoryId) article.category_id = categoryId;
+  return article;
+}
+
+async function step4_quality_check(apiKey: string, article: Record<string, unknown>): Promise<Record<string, unknown>> {
+  console.log("Pipeline Step 4: Quality & SEO Check");
+
+  const data = await callAI(apiKey, [
+    {
+      role: "system",
+      content: `You are a senior editor and SEO specialist. Review this article and provide improvements.
+      
+Check for:
+1. Clarity and readability for beginners
+2. SEO optimization (title, description, headings)
+3. Completeness of steps
+4. Grammar and tone consistency
+5. Missing information
+
+Return your review using the quality_review function.`,
+    },
+    {
+      role: "user",
+      content: `Review this article:\n\nTitle: ${article.title}\nExcerpt: ${article.excerpt}\n\nContent:\n${article.content}\n\nSEO Title: ${article.seo_title}\nSEO Description: ${article.seo_description}\nTags: ${(article.tags as string[])?.join(", ")}`,
+    },
+  ], [
+    {
+      type: "function",
+      function: {
+        name: "quality_review",
+        description: "Return quality improvements",
+        parameters: {
+          type: "object",
+          properties: {
+            quality_score: { type: "number", description: "Quality score out of 10" },
+            improved_title: { type: "string", description: "Improved title if needed, or same title" },
+            improved_seo_title: { type: "string", description: "Improved SEO title under 60 chars" },
+            improved_seo_description: { type: "string", description: "Improved SEO description under 160 chars" },
+            additional_tags: { type: "array", items: { type: "string" }, description: "Any additional relevant tags" },
+            review_notes: { type: "string", description: "Brief review notes" },
+          },
+          required: ["quality_score", "improved_title", "improved_seo_title", "improved_seo_description", "review_notes"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ], { type: "function", function: { name: "quality_review" } });
+
+  const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+  if (!toolCall) return article;
+
+  const review = JSON.parse(toolCall.function.arguments);
+  
+  // Apply improvements
+  article.title = review.improved_title || article.title;
+  article.seo_title = review.improved_seo_title || article.seo_title;
+  article.seo_description = review.improved_seo_description || article.seo_description;
+  if (review.additional_tags?.length) {
+    const existingTags = (article.tags as string[]) || [];
+    article.tags = [...new Set([...existingTags, ...review.additional_tags])].slice(0, 8);
+  }
+
+  return { ...article, _quality_score: review.quality_score, _review_notes: review.review_notes };
+}
+
+// ── Main Handler ────────────────────────────────────────────────────
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -16,281 +293,129 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const { user, db } = await authenticateAdmin(req);
+    const { topic, categoryId, mode = "manual" } = await req.json();
 
-    // Auth check
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    if (!topic) return jsonResp({ error: "Topic is required" }, 400);
 
-    const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_PUBLISHABLE_KEY")!, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: { user }, error: userError } = await userClient.auth.getUser();
-    if (userError || !user) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    console.log(`AI Agent: Starting ${mode} pipeline for: "${topic}"`);
 
-    // Check admin role
-    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: roleData } = await serviceClient
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", user.id)
-      .eq("role", "admin")
-      .maybeSingle();
-
-    if (!roleData) {
-      return new Response(JSON.stringify({ error: "Admin access required" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const { topic, categoryId } = await req.json();
-    if (!topic) {
-      return new Response(JSON.stringify({ error: "Topic is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    console.log("AI Agent: Starting article generation for topic:", topic);
-
-    // Log agent start
-    await serviceClient.from("agent_logs").insert({
-      action: `Starting: "${topic}"`,
-      status: "pending",
-      details: { topic, categoryId },
-    });
-
-    // Fetch categories for context
-    const { data: categories } = await serviceClient
-      .from("categories")
-      .select("id, name, slug")
-      .order("sort_order");
-
-    const categoryList = (categories || []).map((c) => `${c.name} (ID: ${c.id})`).join(", ");
-
-    // Step 1: Research & generate article with AI
-    const systemPrompt = `You are an expert tech writer for DigitalHelp, a beginner-friendly tech help website. 
-You write clear, step-by-step guides that solve everyday digital problems.
-
-AVAILABLE CATEGORIES: ${categoryList}
-
-Your task: Write a complete, high-quality help article about the given topic.
-
-IMPORTANT RULES:
-- Write for complete beginners with zero tech knowledge
-- Use simple, clear language — no jargon
-- Follow this exact structure: Problem description → Step-by-step solution → Quick recap
-- Each step should be numbered and have a clear heading
-- Use **bold** for UI elements, buttons, menu items
-- Include practical tips users need
-- Keep paragraphs short (2-3 sentences max)
-- Article should be 500-1000 words
-
-You MUST respond using the generate_article function.`;
-
-    const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `Write a complete help article about: "${topic}"` },
-        ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "generate_article",
-              description: "Generate a structured help article with all required fields",
-              parameters: {
-                type: "object",
-                properties: {
-                  title: {
-                    type: "string",
-                    description: "SEO-friendly article title, clear and descriptive, under 70 chars",
-                  },
-                  slug: {
-                    type: "string",
-                    description: "URL-friendly slug, lowercase with hyphens, no special chars",
-                  },
-                  excerpt: {
-                    type: "string",
-                    description: "Brief 1-2 sentence summary for search results and previews",
-                  },
-                  content: {
-                    type: "string",
-                    description: "Full article content in Markdown format following the Problem → Steps → Recap structure",
-                  },
-                  category_id: {
-                    type: "string",
-                    description: "The UUID of the best matching category from the provided list",
-                  },
-                  tags: {
-                    type: "array",
-                    items: { type: "string" },
-                    description: "3-6 relevant tags for the article",
-                  },
-                  read_time: {
-                    type: "number",
-                    description: "Estimated reading time in minutes",
-                  },
-                  seo_title: {
-                    type: "string",
-                    description: "SEO meta title under 60 characters",
-                  },
-                  seo_description: {
-                    type: "string",
-                    description: "SEO meta description under 160 characters",
-                  },
-                },
-                required: ["title", "slug", "excerpt", "content", "category_id", "tags", "read_time"],
-                additionalProperties: false,
-              },
-            },
-          },
-        ],
-        tool_choice: { type: "function", function: { name: "generate_article" } },
-      }),
-    });
-
-    if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error("AI gateway error:", aiResponse.status, errorText);
-
-      if (aiResponse.status === 429) {
-        await serviceClient.from("agent_logs").insert({
-          action: `Rate limited: "${topic}"`,
-          status: "failed",
-          details: { error: "Rate limit exceeded" },
-        });
-        return new Response(JSON.stringify({ error: "AI rate limit exceeded. Please try again later." }), {
-          status: 429,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      if (aiResponse.status === 402) {
-        return new Response(JSON.stringify({ error: "AI credits exhausted. Please add credits." }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      throw new Error(`AI gateway returned ${aiResponse.status}`);
-    }
-
-    const aiData = await aiResponse.json();
-    console.log("AI Agent: Got response from AI gateway");
-
-    // Extract the generated article from tool call
-    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) {
-      throw new Error("AI did not return a structured article");
-    }
-
-    const article = JSON.parse(toolCall.function.arguments);
-    console.log("AI Agent: Parsed article:", article.title);
-
-    // Use provided categoryId or AI-suggested one
-    const finalCategoryId = categoryId || article.category_id;
-
-    // Step 2: Save article as draft
-    const { data: savedArticle, error: insertError } = await serviceClient
-      .from("articles")
-      .insert({
-        title: article.title,
-        slug: article.slug,
-        excerpt: article.excerpt,
-        content: article.content,
-        category_id: finalCategoryId,
-        status: "draft",
-        featured: false,
-        read_time: article.read_time || 3,
-        tags: article.tags || [],
-        seo_title: article.seo_title || null,
-        seo_description: article.seo_description || null,
-        ai_generated: true,
-        author_id: user.id,
-      })
+    // Create pipeline run record
+    const { data: run, error: runError } = await db
+      .from("agent_runs")
+      .insert({ topic, mode, status: "researching", current_step: 1, total_steps: 4 })
       .select()
       .single();
-
-    if (insertError) {
-      console.error("Failed to save article:", insertError);
-      // If slug conflict, append timestamp
-      if (insertError.message?.includes("unique")) {
-        const uniqueSlug = `${article.slug}-${Date.now()}`;
-        const { data: retryArticle, error: retryError } = await serviceClient
-          .from("articles")
-          .insert({
-            title: article.title,
-            slug: uniqueSlug,
-            excerpt: article.excerpt,
-            content: article.content,
-            category_id: finalCategoryId,
-            status: "draft",
-            featured: false,
-            read_time: article.read_time || 3,
-            tags: article.tags || [],
-            seo_title: article.seo_title || null,
-            seo_description: article.seo_description || null,
-            ai_generated: true,
-            author_id: user.id,
-          })
-          .select()
-          .single();
-
-        if (retryError) throw retryError;
-
-        await serviceClient.from("agent_logs").insert({
-          action: `Completed: "${article.title}"`,
-          status: "completed",
-          article_id: retryArticle.id,
-          details: { slug: uniqueSlug, tags: article.tags },
-        });
-
-        return new Response(JSON.stringify(retryArticle), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      throw insertError;
+    if (runError) {
+      console.error("Failed to create run:", runError);
+      throw runError;
     }
 
-    // Log success
-    await serviceClient.from("agent_logs").insert({
-      action: `Completed: "${article.title}"`,
-      status: "completed",
-      article_id: savedArticle.id,
-      details: { slug: article.slug, tags: article.tags },
-    });
+    const runId = run.id;
 
-    console.log("AI Agent: Article saved successfully:", savedArticle.id);
+    try {
+      // STEP 1: Deep Research
+      await updateRunStatus(db, runId, "researching", 1);
+      const { research, sources } = await step1_research(LOVABLE_API_KEY, topic);
+      await db.from("agent_runs").update({ research_notes: research, research_sources: sources }).eq("id", runId);
 
-    return new Response(JSON.stringify(savedArticle), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } catch (error) {
+      // STEP 2: Generate Outline
+      await updateRunStatus(db, runId, "outlining", 2);
+      const outline = await step2_outline(LOVABLE_API_KEY, topic, research);
+      await db.from("agent_runs").update({ generated_outline: outline }).eq("id", runId);
+
+      // STEP 3: Write Article
+      await updateRunStatus(db, runId, "writing", 3);
+      const { data: categories } = await db.from("categories").select("id, name, slug").order("sort_order");
+      const article = await step3_write(LOVABLE_API_KEY, topic, research, outline, categories || [], categoryId);
+
+      // STEP 4: Quality Check & SEO
+      await updateRunStatus(db, runId, "optimizing", 4);
+      const finalArticle = await step4_quality_check(LOVABLE_API_KEY, article);
+
+      // Save article
+      const qualityScore = (finalArticle as Record<string, unknown>)._quality_score;
+      const reviewNotes = (finalArticle as Record<string, unknown>)._review_notes;
+      delete (finalArticle as Record<string, unknown>)._quality_score;
+      delete (finalArticle as Record<string, unknown>)._review_notes;
+
+      let slug = finalArticle.slug as string;
+      const insertPayload = {
+        title: finalArticle.title,
+        slug,
+        excerpt: finalArticle.excerpt,
+        content: finalArticle.content,
+        category_id: finalArticle.category_id,
+        status: "draft",
+        featured: false,
+        read_time: (finalArticle.read_time as number) || 3,
+        tags: finalArticle.tags || [],
+        seo_title: finalArticle.seo_title || null,
+        seo_description: finalArticle.seo_description || null,
+        ai_generated: true,
+        author_id: user.id,
+      };
+
+      let { data: savedArticle, error: insertError } = await db.from("articles").insert(insertPayload).select().single();
+
+      // Handle slug conflict
+      if (insertError?.message?.includes("unique")) {
+        slug = `${slug}-${Date.now()}`;
+        const retry = await db.from("articles").insert({ ...insertPayload, slug }).select().single();
+        if (retry.error) throw retry.error;
+        savedArticle = retry.data;
+      } else if (insertError) {
+        throw insertError;
+      }
+
+      // Complete the run
+      await db.from("agent_runs").update({
+        status: "completed",
+        current_step: 4,
+        article_id: savedArticle!.id,
+        completed_at: new Date().toISOString(),
+        token_usage: { quality_score: qualityScore, review_notes: reviewNotes },
+      }).eq("id", runId);
+
+      // Log success
+      await db.from("agent_logs").insert({
+        action: `Pipeline completed: "${finalArticle.title}"`,
+        status: "completed",
+        article_id: savedArticle!.id,
+        details: { slug, tags: finalArticle.tags, quality_score: qualityScore, mode, run_id: runId },
+      });
+
+      console.log("AI Agent: Pipeline complete!", savedArticle!.id);
+
+      return jsonResp({
+        ...savedArticle,
+        _run_id: runId,
+        _quality_score: qualityScore,
+        _review_notes: reviewNotes,
+      });
+
+    } catch (pipelineError) {
+      // Mark run as failed
+      const errMsg = pipelineError instanceof Error ? pipelineError.message : "Pipeline failed";
+      await db.from("agent_runs").update({
+        status: "failed",
+        error_message: errMsg,
+        completed_at: new Date().toISOString(),
+      }).eq("id", runId);
+
+      await db.from("agent_logs").insert({
+        action: `Pipeline failed: "${topic}"`,
+        status: "failed",
+        details: { error: errMsg, run_id: runId },
+      });
+
+      throw pipelineError;
+    }
+
+  } catch (error: unknown) {
     console.error("AI Agent error:", error);
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    return new Response(JSON.stringify({ error: errorMessage }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    const statusCode = (error as { status?: number })?.status || 500;
+    const message = error instanceof Error ? error.message : (error as { message?: string })?.message || "Unknown error";
+    return jsonResp({ error: message }, statusCode);
   }
 });
