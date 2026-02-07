@@ -209,23 +209,34 @@ Analyze the question and articles, then respond in the required JSON format.`,
     // ── Step 3: Trigger article generation if no relevant content ──────
     if (parsed.shouldCreateArticle && parsed.suggestedTopic) {
       const topic = parsed.suggestedTopic.trim();
-      console.log(`Triggering article generation for topic: "${topic}"`);
 
-      // Fire-and-forget: trigger the AI agent to create the article
-      const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+      // Check if there's already an active run for a similar topic
+      const { data: existingRuns } = await db
+        .from("agent_runs")
+        .select("id")
+        .or(`status.eq.checking,status.eq.researching,status.eq.outlining,status.eq.writing,status.eq.verifying,status.eq.optimizing`)
+        .ilike("topic", `%${topic.slice(0, 50)}%`)
+        .limit(1);
 
-      fetch(`${supabaseUrl}/functions/v1/ai-agent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${serviceKey}`,
-        },
-        body: JSON.stringify({
-          action: "generate",
-          topic: topic,
-        }),
-      }).catch((err) => console.error("Failed to trigger article generation:", err));
+      if (!existingRuns || existingRuns.length === 0) {
+        console.log(`Triggering article generation for topic: "${topic}"`);
+        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+        fetch(`${supabaseUrl}/functions/v1/ai-agent`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${serviceKey}`,
+          },
+          body: JSON.stringify({
+            action: "generate",
+            topic: topic,
+          }),
+        }).catch((err) => console.error("Failed to trigger article generation:", err));
+      } else {
+        console.log(`Skipping article generation - already running for similar topic: "${topic}"`);
+      }
     }
 
     return new Response(

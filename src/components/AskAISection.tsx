@@ -18,6 +18,7 @@ const AskAISection = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [hasInteracted, setHasInteracted] = useState(false);
   const [errorCount, setErrorCount] = useState(0);
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -27,17 +28,36 @@ const AskAISection = () => {
     }
   }, [messages]);
 
+  // Auto-reset cooldown
+  useEffect(() => {
+    if (!cooldownUntil) return;
+    const remaining = cooldownUntil - Date.now();
+    if (remaining <= 0) {
+      setCooldownUntil(null);
+      setErrorCount(0);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCooldownUntil(null);
+      setErrorCount(0);
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [cooldownUntil]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const question = input.trim();
     if (!question || isLoading) return;
 
-    // Rate limiting: max 3 consecutive errors before cooldown
+    // Rate limiting: max 3 consecutive errors before 30s cooldown
     if (errorCount >= 3) {
+      if (!cooldownUntil) {
+        setCooldownUntil(Date.now() + 30_000);
+      }
       setMessages((prev) => [...prev, {
         id: Date.now().toString(),
         role: "assistant",
-        content: "I'm having trouble right now. Please wait a moment before trying again.",
+        content: "I'm having trouble right now. Please wait about 30 seconds before trying again.",
       }]);
       return;
     }
@@ -58,7 +78,23 @@ const AskAISection = () => {
         body: { question },
       });
 
-      if (error) throw error;
+      // supabase.functions.invoke puts non-2xx responses in error
+      if (error) {
+        // Try to extract structured error from response
+        const errorBody = typeof error === "object" && "context" in error
+          ? error.context
+          : null;
+
+        if (errorBody?.status === 429) {
+          throw new Error("Our AI is currently busy. Please wait a moment before trying again.");
+        }
+        throw new Error(error.message || "Something went wrong.");
+      }
+
+      // Check if edge function returned an error in the data
+      if (data?.error) {
+        throw new Error(data.error);
+      }
 
       const assistantMsg: Message = {
         id: (Date.now() + 1).toString(),
@@ -68,14 +104,16 @@ const AskAISection = () => {
         articleGenerationTriggered: data.articleGenerationTriggered,
       };
       setMessages((prev) => [...prev, assistantMsg]);
-      setErrorCount(0); // Reset on success
+      setErrorCount(0);
     } catch (err) {
       console.error("Ask AI error:", err);
       setErrorCount((prev) => prev + 1);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: "Sorry, I'm having trouble right now. Please try again in a moment.",
+        content: err instanceof Error
+          ? err.message
+          : "Sorry, I'm having trouble right now. Please try again in a moment.",
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -94,6 +132,8 @@ const AskAISection = () => {
     "Clear browser cache",
     "How to update my phone?",
   ];
+
+  const isCoolingDown = cooldownUntil !== null && Date.now() < cooldownUntil;
 
   return (
     <section className="container py-14 md:py-20">
@@ -183,7 +223,6 @@ const AskAISection = () => {
                             <div className="bg-muted/50 rounded-2xl rounded-tl-md px-4 py-3">
                               <MarkdownLite content={msg.content} />
                             </div>
-                            {/* Article Recommendations */}
                             {msg.recommendedArticles && msg.recommendedArticles.length > 0 && (
                               <div className="space-y-2">
                                 {msg.recommendedArticles.map((article) => (
@@ -206,7 +245,6 @@ const AskAISection = () => {
                                 ))}
                               </div>
                             )}
-                            {/* Article Generation Notice */}
                             {msg.articleGenerationTriggered && (
                               <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/10 border border-accent/20">
                                 <Sparkles className="h-3.5 w-3.5 text-accent flex-shrink-0" />
@@ -227,7 +265,6 @@ const AskAISection = () => {
                   ))}
                 </AnimatePresence>
 
-                {/* Loading indicator */}
                 {isLoading && (
                   <motion.div
                     initial={{ opacity: 0 }}
@@ -259,13 +296,13 @@ const AskAISection = () => {
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask any tech question..."
-                disabled={isLoading}
+                placeholder={isCoolingDown ? "Please wait before sending another message..." : "Ask any tech question..."}
+                disabled={isLoading || isCoolingDown}
                 className="flex-1 px-4 py-2.5 text-sm bg-muted/50 rounded-xl outline-none text-foreground placeholder:text-muted-foreground disabled:opacity-60 border border-transparent focus:border-primary/30 transition-colors"
               />
               <button
                 type="submit"
-                disabled={!input.trim() || isLoading}
+                disabled={!input.trim() || isLoading || isCoolingDown}
                 className="w-10 h-10 rounded-xl bg-primary text-primary-foreground flex items-center justify-center hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
               >
                 <Send className="h-4 w-4" />
@@ -285,17 +322,13 @@ const MarkdownLite = ({ content }: { content: string }) => {
   return (
     <div className="text-sm text-foreground/90 space-y-1.5 leading-relaxed">
       {lines.map((line, i) => {
-        // Bold
         const boldLine = line.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-foreground">$1</strong>');
-        // Italic
         const italicLine = boldLine.replace(/\*(.*?)\*/g, '<em class="text-muted-foreground">$1</em>');
-        // Links [text](/path)
         const linkedLine = italicLine.replace(
           /\[(.*?)\]\((\/article\/[^\)]+)\)/g,
           '<a href="$2" class="text-primary hover:underline font-medium">$1</a>'
         );
 
-        // Emoji bullets (📖, 💡, etc.)
         if (line.trim().startsWith("- ") || line.trim().startsWith("• ")) {
           return (
             <div key={i} className="pl-3 flex gap-1.5">
