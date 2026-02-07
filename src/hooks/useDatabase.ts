@@ -51,12 +51,16 @@ export function useArticleBySlug(slug: string) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!slug) return;
+    if (!slug) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     supabase
       .from("articles")
       .select("*")
       .eq("slug", slug)
+      .eq("status", "published")
       .maybeSingle()
       .then(({ data }) => {
         setArticle(data);
@@ -136,10 +140,14 @@ export function useSearchArticles(query: string) {
 
 export function useArticlesByCategory(categoryId: string | undefined) {
   const [articles, setArticles] = useState<DbArticle[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!categoryId) return;
+    if (!categoryId) {
+      setArticles([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     supabase
       .from("articles")
