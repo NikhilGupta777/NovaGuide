@@ -30,6 +30,14 @@ async function authenticateAdmin(req: Request) {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) throw { status: 401, message: "Unauthorized" };
 
+  // Allow service-role calls (e.g. from ai-ask triggering article generation)
+  const token = authHeader.replace("Bearer ", "");
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  if (token === serviceKey) {
+    console.log("Service-role auth: bypassing admin check (internal call)");
+    return { user: null, db: serviceClient() };
+  }
+
   const userClient = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_ANON_KEY")!,
@@ -659,7 +667,7 @@ serve(async (req) => {
         seo_title: finalArticle.seo_title || null,
         seo_description: finalArticle.seo_description || null,
         ai_generated: true,
-        author_id: user.id,
+        author_id: user?.id || null,
         sources: sources,
       };
 

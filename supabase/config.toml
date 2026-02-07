@@ -3,6 +3,9 @@ project_id = "wjywnpxbhpiudqvxloxb"
 [functions.ai-agent]
 verify_jwt = false
 
+[functions.ai-ask]
+verify_jwt = false
+
 [functions.ai-auto-discover]
 verify_jwt = false
 
