@@ -92,6 +92,7 @@ export default function AIAgentPanel() {
   const [discoveredTopics, setDiscoveredTopics] = useState<DiscoveredTopic[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [discoverCount, setDiscoverCount] = useState(5);
+  const [autoMake, setAutoMake] = useState(false);
 
   // Batch
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
@@ -201,8 +202,17 @@ export default function AIAgentPanel() {
         body: { count: discoverCount, targetCategories: [] },
       });
       if (error) throw error;
-      setDiscoveredTopics(data.topics || []);
-      toast({ title: "Topics Discovered!", description: `Found ${data.topics?.length || 0} trending topics via Google Search.` });
+      const topics = data.topics || [];
+      setDiscoveredTopics(topics);
+      toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
+
+      // Auto-make: push all to batch and start generating
+      if (autoMake && topics.length > 0) {
+        setBatchQueue(topics);
+        toast({ title: "Auto-Make Active", description: `Pushing ${topics.length} topics to batch and starting generation...` });
+        // Start batch generation automatically
+        await runBatch(topics);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Discovery failed";
       toast({ title: "Error", description: msg, variant: "destructive" });
@@ -211,16 +221,13 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Batch generate
-  const handleBatchGenerate = async () => {
-    if (batchQueue.length === 0) {
-      toast({ title: "Error", description: "Add topics to the batch queue first.", variant: "destructive" });
-      return;
-    }
+  // Core batch runner (reusable for auto-make and manual batch)
+  const runBatch = async (items: DiscoveredTopic[]) => {
+    if (items.length === 0) return;
     setBatchRunning(true);
     setBatchProgress(0);
-    for (let i = 0; i < batchQueue.length; i++) {
-      const item = batchQueue[i];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
       setBatchProgress(i + 1);
       try {
         await supabase.functions.invoke("ai-agent", {
@@ -229,16 +236,25 @@ export default function AIAgentPanel() {
       } catch (err) {
         console.error(`Batch item ${i} failed:`, err);
       }
-      if (i < batchQueue.length - 1) {
+      if (i < items.length - 1) {
         await new Promise(r => setTimeout(r, 5000));
       }
     }
-    toast({ title: "Batch Complete!", description: `Generated ${batchQueue.length} articles as drafts.` });
+    toast({ title: "Batch Complete!", description: `Generated ${items.length} articles as drafts.` });
     setBatchQueue([]);
     setBatchRunning(false);
     setBatchProgress(0);
     refetchArticles();
     fetchRuns();
+  };
+
+  // Batch generate (manual trigger)
+  const handleBatchGenerate = async () => {
+    if (batchQueue.length === 0) {
+      toast({ title: "Error", description: "Add topics to the batch queue first.", variant: "destructive" });
+      return;
+    }
+    await runBatch(batchQueue);
   };
 
   // Save automation settings
@@ -390,25 +406,36 @@ export default function AIAgentPanel() {
                       className="w-full px-3 py-2.5 rounded-lg border border-input bg-background text-foreground text-sm outline-none"
                       disabled={discovering}
                     >
-                      {[3, 5, 8, 10].map(n => (
+                      {[5, 10, 30, 50, 75, 100].map(n => (
                         <option key={n} value={n}>{n} topics</option>
                       ))}
                     </select>
                   </div>
+                  <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
+                    <div className="flex-1 min-w-0 mr-3">
+                      <p className="text-sm font-medium text-foreground">Auto-Make</p>
+                      <p className="text-xs text-muted-foreground">Discover → auto batch → generate all articles</p>
+                    </div>
+                    <Switch
+                      checked={autoMake}
+                      onCheckedChange={setAutoMake}
+                      disabled={discovering || batchRunning}
+                    />
+                  </div>
                   <button
                     onClick={handleDiscover}
-                    disabled={discovering}
+                    disabled={discovering || batchRunning}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
                   >
                     {discovering ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        Searching the web...
+                        {autoMake ? "Discovering & auto-generating..." : "Searching the web..."}
                       </>
                     ) : (
                       <>
                         <TrendingUp className="h-4 w-4" />
-                        Discover Trending Topics
+                        {autoMake ? "Discover & Auto-Make All" : "Discover Trending Topics"}
                       </>
                     )}
                   </button>
