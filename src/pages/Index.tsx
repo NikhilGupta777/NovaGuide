@@ -7,6 +7,7 @@ import SearchBar from "@/components/SearchBar";
 import CategoryCard from "@/components/CategoryCard";
 import ArticleCard from "@/components/ArticleCard";
 import AdPlaceholder from "@/components/AdPlaceholder";
+import AskAISection from "@/components/AskAISection";
 import { useCategories, useFeaturedArticles, useArticles } from "@/hooks/useDatabase";
 
 const Index = () => {
@@ -159,6 +160,9 @@ const Index = () => {
           </div>
         </section>
       )}
+
+      {/* Ask AI Section */}
+      <AskAISection />
 
       {/* Inline Ad */}
       <div className="container py-4">
