@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -62,6 +62,13 @@ export default function NightlyBuilderTab() {
   const [saving, setSaving] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Local slider state for instant UI feedback without DB spam
+  const [localTopics, setLocalTopics] = useState(50);
+  const [localQuality, setLocalQuality] = useState(7);
+  const [localFactual, setLocalFactual] = useState(7);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchSettings = useCallback(async () => {
     const { data } = await supabase
@@ -70,8 +77,13 @@ export default function NightlyBuilderTab() {
       .limit(1)
       .maybeSingle();
     if (data) {
-      setSettings(data as unknown as NightlySettings);
+      const s = data as unknown as NightlySettings;
+      setSettings(s);
+      setLocalTopics(s.topics_per_category);
+      setLocalQuality(s.auto_publish_min_quality);
+      setLocalFactual(s.auto_publish_min_factual);
     }
+    setLoading(false);
   }, []);
 
   const fetchRuns = useCallback(async () => {
@@ -119,22 +131,39 @@ export default function NightlyBuilderTab() {
     return () => clearInterval(interval);
   }, [runs, fetchRuns, fetchQueueStats]);
 
+  // Save settings to DB (immediate for toggles, debounced for sliders)
   const saveSettings = async (updates: Partial<NightlySettings>) => {
     setSaving(true);
     try {
       if (settings) {
         await supabase.from("nightly_builder_settings").update(updates).eq("id", settings.id);
       } else {
-        await supabase.from("nightly_builder_settings").insert(updates);
+        // Create initial settings row
+        await supabase.from("nightly_builder_settings").insert({
+          enabled: false,
+          topics_per_category: 50,
+          auto_publish_min_quality: 7,
+          auto_publish_min_factual: 7,
+          allow_category_creation: true,
+          stop_requested: false,
+          ...updates,
+        });
       }
       await fetchSettings();
-      toast({ title: "Settings Saved", description: "Nightly builder settings updated." });
     } catch (err) {
       console.error("Save nightly settings error:", err);
       toast({ title: "Error", description: "Failed to save settings.", variant: "destructive" });
     } finally {
       setSaving(false);
     }
+  };
+
+  // Debounced save for sliders (500ms delay)
+  const debouncedSave = (updates: Partial<NightlySettings>) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      saveSettings(updates);
+    }, 500);
   };
 
   const handleRunNow = async (batch = 1) => {
@@ -163,6 +192,14 @@ export default function NightlyBuilderTab() {
   const isRunning = runs.some(r => r.status === "researching" || r.status === "generating");
   const lastRun = runs[0];
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Configuration Card */}
@@ -172,7 +209,7 @@ export default function NightlyBuilderTab() {
           <h3 className="font-semibold text-foreground">Nightly Content Builder</h3>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Uses Gemini Deep Research to find 30-100+ common questions per category from the entire web, then generates all articles autonomously overnight with auto-publish.
+          Uses Gemini Flash + Google Search grounding to find 30-100+ common questions per category, then generates all articles autonomously with auto-publish.
         </p>
 
         <div className="space-y-5">
@@ -193,11 +230,14 @@ export default function NightlyBuilderTab() {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-sm font-medium text-foreground">Topics per category</label>
-              <span className="text-sm font-mono text-primary">{settings?.topics_per_category || 50}</span>
+              <span className="text-sm font-mono text-primary">{localTopics}</span>
             </div>
             <Slider
-              value={[settings?.topics_per_category || 50]}
-              onValueChange={([val]) => saveSettings({ topics_per_category: val })}
+              value={[localTopics]}
+              onValueChange={([val]) => {
+                setLocalTopics(val);
+                debouncedSave({ topics_per_category: val });
+              }}
               min={30}
               max={100}
               step={10}
@@ -213,11 +253,14 @@ export default function NightlyBuilderTab() {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-sm font-medium text-foreground">Auto-publish quality threshold</label>
-              <span className="text-sm font-mono text-primary">{settings?.auto_publish_min_quality || 7}/10</span>
+              <span className="text-sm font-mono text-primary">{localQuality}/10</span>
             </div>
             <Slider
-              value={[settings?.auto_publish_min_quality || 7]}
-              onValueChange={([val]) => saveSettings({ auto_publish_min_quality: val })}
+              value={[localQuality]}
+              onValueChange={([val]) => {
+                setLocalQuality(val);
+                debouncedSave({ auto_publish_min_quality: val });
+              }}
               min={5}
               max={10}
               step={1}
@@ -233,11 +276,14 @@ export default function NightlyBuilderTab() {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-sm font-medium text-foreground">Auto-publish factual threshold</label>
-              <span className="text-sm font-mono text-primary">{settings?.auto_publish_min_factual || 7}/10</span>
+              <span className="text-sm font-mono text-primary">{localFactual}/10</span>
             </div>
             <Slider
-              value={[settings?.auto_publish_min_factual || 7]}
-              onValueChange={([val]) => saveSettings({ auto_publish_min_factual: val })}
+              value={[localFactual]}
+              onValueChange={([val]) => {
+                setLocalFactual(val);
+                debouncedSave({ auto_publish_min_factual: val });
+              }}
               min={5}
               max={10}
               step={1}
@@ -281,7 +327,6 @@ export default function NightlyBuilderTab() {
                 </span>
               </div>
             )}
-            {/* Queue stats */}
             {(queueStats.batch1_pending + queueStats.batch2_pending + queueStats.batch3_pending > 0) && (
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">Queue pending</span>

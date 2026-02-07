@@ -10,7 +10,6 @@ const corsHeaders = {
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODEL_FLASH = "gemini-2.5-flash";
 const MODEL_LITE = "gemini-2.5-flash-lite";
-const DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025";
 
 // Safe icons that exist in the frontend iconMap
 const SAFE_ICONS = [
@@ -37,85 +36,110 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ── Deep Research API ─────────────────────────────────────────────
+// ── Deep Research via Gemini Flash + Google Search Grounding ──────
+// Using the standard generateContent API with google_search tool
+// (more reliable than the Interactions API which may not be available)
 
-async function startDeepResearch(apiKey: string, prompt: string): Promise<string> {
-  console.log("Starting Deep Research interaction...");
-  const resp = await fetch(`${GEMINI_BASE}/interactions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
+async function deepResearchCategory(
+  apiKey: string,
+  categoryName: string,
+  categoryDescription: string,
+  existingTitles: string[],
+  topicsCount: number
+): Promise<string[]> {
+  console.log(`Deep researching category: ${categoryName}`);
+
+  const prompt = `You are researching for a tech help website called DigitalHelp.
+
+CATEGORY: ${categoryName}
+DESCRIPTION: ${categoryDescription || "General tech help articles"}
+
+EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest these again):
+${existingTitles.length > 0 ? existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
+
+YOUR TASK:
+Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}" in the tech/digital help space.
+
+Focus on:
+- Questions real people ask on Google, Reddit, Quora, forums
+- Common problems and troubleshooting guides
+- Step-by-step how-to guides
+- Beginner-friendly topics that get high search volume
+- Recent/trending topics (2024-2026)
+
+IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
+
+Return ONLY a valid JSON array of strings with ${topicsCount} unique, specific questions/topics. Each should be a clear, searchable question or how-to title.
+Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
+
+  // Use Gemini Flash with Google Search grounding for real web data
+  const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${apiKey}`;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }],
+    generationConfig: {
+      temperature: 0.4,
+      maxOutputTokens: 8192,
     },
-    body: JSON.stringify({
-      input: prompt,
-      agent: DEEP_RESEARCH_AGENT,
-      background: true,
-    }),
+    systemInstruction: {
+      parts: [{ text: "You are a research assistant that discovers trending tech help topics. Use web search to find real, commonly-asked questions. Return ONLY a JSON array of strings." }]
+    },
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
     const txt = await resp.text();
-    console.error("Deep Research start error:", resp.status, txt);
-    throw new Error(`Deep Research start failed (${resp.status}): ${txt}`);
+    console.error(`Research error for ${categoryName}:`, resp.status, txt);
+    if (resp.status === 429) {
+      console.log("Rate limited during research, waiting 30s...");
+      await delay(30000);
+      return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+    }
+    throw new Error(`Research failed (${resp.status}): ${txt}`);
   }
 
   const data = await resp.json();
-  const interactionId = data.id || data.name;
-  console.log("Deep Research started, interaction ID:", interactionId);
-  return interactionId;
-}
+  const candidates = data.candidates || [];
+  if (!candidates[0]?.content?.parts) {
+    console.error("No content in research response");
+    return [];
+  }
 
-async function pollDeepResearch(apiKey: string, interactionId: string, maxWaitMs = 600000): Promise<string> {
-  console.log("Polling Deep Research interaction:", interactionId);
-  const startTime = Date.now();
+  const responseText = candidates[0].content.parts.map((p: { text?: string }) => p.text || "").join("");
 
-  while (Date.now() - startTime < maxWaitMs) {
-    await delay(10000); // Poll every 10 seconds
-
-    const resp = await fetch(`${GEMINI_BASE}/interactions/${interactionId}`, {
-      method: "GET",
-      headers: { "x-goog-api-key": apiKey },
-    });
-
-    if (!resp.ok) {
-      const txt = await resp.text();
-      console.error("Poll error:", resp.status, txt);
-      // Continue polling on transient errors
-      if (resp.status >= 500) continue;
-      throw new Error(`Poll failed (${resp.status}): ${txt}`);
+  // Parse JSON array from response
+  let topics: string[] = [];
+  try {
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      topics = JSON.parse(jsonMatch[0]);
     }
+  } catch (e) {
+    console.error("Failed to parse research topics JSON:", e);
+    console.log("Raw response:", responseText.substring(0, 500));
 
-    const data = await resp.json();
-    const status = (data.status || "").toUpperCase();
-    console.log("Poll status:", status);
-
-    if (status === "COMPLETED" || status === "COMPLETE") {
-      // Extract text from outputs
-      const outputs = data.outputs || [];
-      let resultText = "";
-      for (const output of outputs) {
-        if (output.text) {
-          resultText += output.text + "\n";
-        } else if (output.content?.parts) {
-          for (const part of output.content.parts) {
-            if (part.text) resultText += part.text + "\n";
-          }
-        }
+    // Fallback: try to parse line-by-line
+    try {
+      const parsePrompt = `Extract all questions/topics from this text and return them as a JSON array of strings. Only include clear, specific questions or how-to topics.\n\nText:\n${responseText.substring(0, 12000)}\n\nReturn ONLY a valid JSON array.`;
+      const parsed = await callGeminiFlash(apiKey, MODEL_LITE, parsePrompt, "Return ONLY a JSON array of strings.");
+      const fallbackMatch = parsed.match(/\[[\s\S]*\]/);
+      if (fallbackMatch) {
+        topics = JSON.parse(fallbackMatch[0]);
       }
-      if (!resultText && data.output?.text) {
-        resultText = data.output.text;
-      }
-      console.log(`Deep Research completed: ${resultText.length} chars`);
-      return resultText;
-    }
-
-    if (status === "FAILED") {
-      throw new Error(`Deep Research failed: ${JSON.stringify(data)}`);
+    } catch {
+      console.error("Fallback parsing also failed");
     }
   }
 
-  throw new Error("Deep Research timed out after " + (maxWaitMs / 1000) + "s");
+  // Filter out non-string items
+  topics = topics.filter(t => typeof t === "string" && t.trim().length > 10);
+  console.log(`Category "${categoryName}": found ${topics.length} topics`);
+  return topics;
 }
 
 // ── Gemini Flash Call (for parsing / dedup) ───────────────────────
@@ -158,6 +182,25 @@ async function callGeminiFlash(
   return candidates[0].content.parts.map((p: { text?: string }) => p.text || "").join("");
 }
 
+// ── Ensure settings row exists ────────────────────────────────────
+
+async function ensureSettings(db: ReturnType<typeof serviceClient>) {
+  const { data: existing } = await db.from("nightly_builder_settings").select("*").limit(1);
+  if (existing && existing.length > 0) return existing[0];
+
+  // Create default settings
+  const { data: created } = await db.from("nightly_builder_settings").insert({
+    enabled: false,
+    topics_per_category: 50,
+    auto_publish_min_quality: 7,
+    auto_publish_min_factual: 7,
+    allow_category_creation: true,
+    stop_requested: false,
+  }).select().single();
+
+  return created;
+}
+
 // ── Main Orchestrator ─────────────────────────────────────────────
 
 async function runNightlyBuilder(batch: number) {
@@ -165,10 +208,12 @@ async function runNightlyBuilder(batch: number) {
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
+  // Ensure settings exist
+  const settings = await ensureSettings(db);
+  if (!settings) throw new Error("Failed to get/create nightly builder settings");
+
   // Check if enabled
-  const { data: settingsArr } = await db.from("nightly_builder_settings").select("*").limit(1);
-  const settings = settingsArr?.[0];
-  if (!settings?.enabled) {
+  if (!settings.enabled) {
     console.log("Nightly builder is disabled. Skipping.");
     return;
   }
@@ -240,8 +285,8 @@ async function runBatch1(
   let categoriesCreated = 0;
   const detailsMap: Record<string, unknown> = {};
 
-  // Phase B: Deep Research per category
-  console.log("Phase B: Starting Deep Research for each category...");
+  // Phase B: Research per category using Gemini Flash + Google Search
+  console.log("Phase B: Starting research for each category...");
   for (const category of categories) {
     // Check stop
     const { data: freshSettings } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
@@ -254,86 +299,39 @@ async function runBatch1(
         details: detailsMap,
         completed_at: new Date().toISOString(),
       }).eq("id", runId);
+      await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
       return;
     }
 
     const categoryArticles = articles?.filter(a => a.category_id === category.id) || [];
     const existingTitles = categoryArticles.map(a => a.title);
 
-    console.log(`Researching category: ${category.name} (${existingTitles.length} existing articles)`);
-
     try {
-      const researchPrompt = `You are researching for a tech help website called DigitalHelp. 
+      const topics = await deepResearchCategory(
+        apiKey,
+        category.name,
+        category.description || "",
+        existingTitles,
+        topicsPerCategory
+      );
 
-CATEGORY: ${category.name}
-DESCRIPTION: ${category.description || "General tech help articles"}
-
-EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest these again):
-${existingTitles.length > 0 ? existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
-
-YOUR TASK:
-Find the top ${topicsPerCategory} most commonly searched questions, problems, and how-to topics that people search for online related to "${category.name}" in the tech/digital help space.
-
-Focus on:
-- Questions real people ask on Google, Reddit, Quora, forums
-- Common problems and troubleshooting guides
-- Step-by-step how-to guides
-- Beginner-friendly topics that get high search volume
-- Recent/trending topics (2024-2026)
-
-IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
-
-Return a numbered list of ${topicsPerCategory} unique, specific questions/topics. Each should be a clear, searchable question or how-to title.`;
-
-      // Start Deep Research
-      const interactionId = await startDeepResearch(apiKey, researchPrompt);
-
-      // Poll for completion (max 10 min per category)
-      const researchResult = await pollDeepResearch(apiKey, interactionId, 600000);
-
-      // Parse research output into structured topics using Flash
-      const parsePrompt = `Extract all distinct questions/topics from this research output. Return them as a JSON array of strings. Only include clear, specific questions or how-to topics suitable for help articles. Remove any duplicates or overly similar items.
-
-Research output:
-${researchResult.substring(0, 15000)}
-
-Return ONLY a valid JSON array of strings, nothing else. Example: ["How to reset iPhone password", "Fix slow WiFi connection"]`;
-
-      const parsedText = await callGeminiFlash(apiKey, MODEL_FLASH, parsePrompt,
-        "You are a JSON parser. Return ONLY a valid JSON array of strings. No markdown, no explanation.");
-
-      let parsedTopics: string[] = [];
-      try {
-        // Extract JSON array from response
-        const jsonMatch = parsedText.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          parsedTopics = JSON.parse(jsonMatch[0]);
-        }
-      } catch (e) {
-        console.error("Failed to parse topics JSON:", e);
-        console.log("Raw parse output:", parsedText.substring(0, 500));
-      }
-
-      console.log(`Category "${category.name}": found ${parsedTopics.length} topics`);
-      totalTopicsFound += parsedTopics.length;
-
-      for (let i = 0; i < parsedTopics.length; i++) {
+      totalTopicsFound += topics.length;
+      for (let i = 0; i < topics.length; i++) {
         allTopics.push({
-          topic: parsedTopics[i],
+          topic: topics[i],
           category_id: category.id,
           priority: i,
         });
       }
 
       detailsMap[category.name] = {
-        topics_found: parsedTopics.length,
+        topics_found: topics.length,
         existing_articles: existingTitles.length,
       };
-
       categoriesProcessed++;
 
-      // Rate limit: wait between categories
-      await delay(5000);
+      // Rate limit between categories
+      await delay(3000);
     } catch (err) {
       console.error(`Error researching category "${category.name}":`, err);
       detailsMap[category.name] = {
@@ -348,7 +346,6 @@ Return ONLY a valid JSON array of strings, nothing else. Example: ["How to reset
   const allExistingTitles = articles?.map(a => a.title.toLowerCase()) || [];
   let dedupedTopics = allTopics.filter(t => {
     const topicLower = t.topic.toLowerCase();
-    // Basic exact/near-exact match filter
     return !allExistingTitles.some(existing =>
       existing === topicLower ||
       existing.includes(topicLower) ||
@@ -366,14 +363,14 @@ Return ONLY a valid JSON array of strings, nothing else. Example: ["How to reset
       }
 
       const finalDeduped: typeof dedupedTopics = [];
-      for (const batch of dedupBatches) {
+      for (const batchItems of dedupBatches) {
         const dedupPrompt = `Compare these proposed topics against existing article titles. Remove any proposed topic that would cover essentially the same content as an existing article (even if worded differently).
 
 EXISTING ARTICLES:
 ${allExistingTitles.slice(0, 200).join("\n")}
 
 PROPOSED TOPICS:
-${batch.map((t, i) => `${i}. ${t.topic}`).join("\n")}
+${batchItems.map((t, i) => `${i}. ${t.topic}`).join("\n")}
 
 Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQUE and should be KEPT. Example: [0, 2, 5, 7]`;
 
@@ -385,15 +382,15 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
           if (jsonMatch) {
             const keepIndices: number[] = JSON.parse(jsonMatch[0]);
             for (const idx of keepIndices) {
-              if (idx >= 0 && idx < batch.length) {
-                finalDeduped.push(batch[idx]);
+              if (idx >= 0 && idx < batchItems.length) {
+                finalDeduped.push(batchItems[idx]);
               }
             }
           } else {
-            finalDeduped.push(...batch); // Keep all if parsing fails
+            finalDeduped.push(...batchItems);
           }
         } catch {
-          finalDeduped.push(...batch);
+          finalDeduped.push(...batchItems);
         }
 
         await delay(2000);
@@ -411,41 +408,31 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
     console.log("Phase D: Checking for missing categories...");
     try {
       const categoryNames = categories.map(c => c.name).join(", ");
-      const catResearchPrompt = `You are analyzing a tech help website called DigitalHelp.
+      const catPrompt = `You are analyzing a tech help website called DigitalHelp.
 
 EXISTING CATEGORIES: ${categoryNames}
 
-Research what major tech help categories are MISSING from this website. Think about what people commonly search for help with in technology that isn't covered by the existing categories.
+What major tech help categories are MISSING from this website? Think about what people commonly search for help with in technology that isn't covered.
 
 Consider areas like: Smart Home, Privacy & VPN, Email, Cloud Storage, Gaming, Wearables, Networking, Printing, Streaming, etc.
 
 Only suggest categories that would have substantial content (at least 20+ common questions). Don't suggest categories that overlap significantly with existing ones.
 
-List 0-5 missing category suggestions with a name and brief description for each.`;
-
-      const catInteractionId = await startDeepResearch(apiKey, catResearchPrompt);
-      const catResearchResult = await pollDeepResearch(apiKey, catInteractionId, 300000);
-
-      // Parse into structured categories
-      const catParsePrompt = `Extract the suggested new categories from this research. Return a JSON array of objects with "name", "description", and "icon" fields.
-
-For the "icon" field, choose the most appropriate icon from this list: ${SAFE_ICONS.join(", ")}. Default to "Lightbulb" if unsure.
-
-Research output:
-${catResearchResult.substring(0, 5000)}
+Return a JSON array of objects with "name", "description", and "icon" fields.
+For "icon", choose from: ${SAFE_ICONS.join(", ")}. Default to "Lightbulb" if unsure.
+Suggest 0-5 categories max.
 
 Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": "Help with smart home devices", "icon": "Wifi"}]`;
 
-      const catParsed = await callGeminiFlash(apiKey, MODEL_FLASH, catParsePrompt,
-        "Return ONLY a valid JSON array. No markdown, no explanation.");
+      const catResult = await callGeminiFlash(apiKey, MODEL_FLASH, catPrompt,
+        "Return ONLY a valid JSON array of category objects. No markdown.");
 
       try {
-        const jsonMatch = catParsed.match(/\[[\s\S]*\]/);
+        const jsonMatch = catResult.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
           const newCats: { name: string; description: string; icon: string }[] = JSON.parse(jsonMatch[0]);
 
           for (const newCat of newCats.slice(0, 5)) {
-            // Validate icon
             const icon = SAFE_ICONS.includes(newCat.icon) ? newCat.icon : "Lightbulb";
             const slug = newCat.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
@@ -468,35 +455,30 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
               console.log(`Created new category: ${newCat.name}`);
               categoriesCreated++;
 
-              // Research topics for new category too
+              // Research topics for new category
               try {
-                const newCatPrompt = `Find the top ${topicsPerCategory} most commonly searched questions and how-to topics about "${newCat.name}" (${newCat.description}) in the tech/digital help space. Return a numbered list of specific, searchable questions.`;
+                const newTopics = await deepResearchCategory(
+                  apiKey,
+                  newCat.name,
+                  newCat.description,
+                  [],
+                  topicsPerCategory
+                );
 
-                const newCatInteractionId = await startDeepResearch(apiKey, newCatPrompt);
-                const newCatResult = await pollDeepResearch(apiKey, newCatInteractionId, 300000);
-
-                const newCatParse = await callGeminiFlash(apiKey, MODEL_FLASH,
-                  `Extract all questions/topics as a JSON array of strings:\n${newCatResult.substring(0, 10000)}`,
-                  "Return ONLY a JSON array of strings.");
-
-                const newJsonMatch = newCatParse.match(/\[[\s\S]*\]/);
-                if (newJsonMatch) {
-                  const newTopics: string[] = JSON.parse(newJsonMatch[0]);
-                  for (let i = 0; i < newTopics.length; i++) {
-                    dedupedTopics.push({
-                      topic: newTopics[i],
-                      category_id: insertedCat.id,
-                      priority: i,
-                    });
-                  }
-                  totalTopicsFound += newTopics.length;
-                  detailsMap[newCat.name] = { topics_found: newTopics.length, new_category: true };
+                for (let i = 0; i < newTopics.length; i++) {
+                  dedupedTopics.push({
+                    topic: newTopics[i],
+                    category_id: insertedCat.id,
+                    priority: i,
+                  });
                 }
+                totalTopicsFound += newTopics.length;
+                detailsMap[newCat.name] = { topics_found: newTopics.length, new_category: true };
               } catch (err) {
                 console.error(`Error researching new category "${newCat.name}":`, err);
               }
 
-              await delay(5000);
+              await delay(3000);
             }
           }
         }
@@ -513,7 +495,6 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
   const BATCH1_PER_CAT = 30;
   const BATCH2_PER_CAT = 50;
 
-  // Group by category
   const topicsByCategory: Record<string, typeof dedupedTopics> = {};
   for (const t of dedupedTopics) {
     if (!topicsByCategory[t.category_id]) topicsByCategory[t.category_id] = [];
@@ -541,7 +522,6 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
   ];
 
   if (queueInserts.length > 0) {
-    // Insert in batches of 100
     for (let i = 0; i < queueInserts.length; i += 100) {
       await db.from("nightly_builder_queue").insert(queueInserts.slice(i, i + 100));
     }
@@ -561,21 +541,20 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
 
   // Phase F: Generate Batch 1 articles
   console.log("Phase F: Generating Batch 1 articles...");
-  await generateArticlesFromQueue(db, apiKey, settings, runId, 1, today);
+  await generateArticlesFromQueue(db, settings, runId, 1, today);
 }
 
 // ── Overflow Batch Processing ─────────────────────────────────────
 
 async function runOverflowBatch(
   db: ReturnType<typeof serviceClient>,
-  apiKey: string,
+  _apiKey: string,
   settings: Record<string, unknown>,
   runId: string,
   batch: number
 ) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count pending items for this batch
   const { count } = await db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
     .eq("run_date", today)
@@ -593,14 +572,13 @@ async function runOverflowBatch(
 
   console.log(`Processing ${count} pending items for batch ${batch}`);
   await db.from("nightly_builder_runs").update({ status: "generating" }).eq("id", runId);
-  await generateArticlesFromQueue(db, apiKey, settings, runId, batch, today);
+  await generateArticlesFromQueue(db, settings, runId, batch, today);
 }
 
 // ── Article Generation from Queue ─────────────────────────────────
 
 async function generateArticlesFromQueue(
   db: ReturnType<typeof serviceClient>,
-  _apiKey: string,
   settings: Record<string, unknown>,
   runId: string,
   batch: number,
@@ -652,7 +630,6 @@ async function generateArticlesFromQueue(
         articles_failed: articlesFailed,
         completed_at: new Date().toISOString(),
       }).eq("id", runId);
-      // Reset stop flag
       await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
       return;
     }
@@ -697,40 +674,32 @@ async function generateArticlesFromQueue(
         throw new Error(agentData.error);
       }
 
-      const articleId = agentData.articleId || agentData.article_id;
+      // ai-agent returns articleId directly in the response (via ...savedArticle spread)
+      const articleId = agentData.id || agentData.articleId || agentData.article_id;
       articlesGenerated++;
 
       // Update queue item
       await db.from("nightly_builder_queue").update({
         status: "completed",
-        article_id: articleId,
+        article_id: articleId || null,
       }).eq("id", item.id);
 
-      // Check quality and factual scores for auto-publish
-      if (agentData._run_id) {
-        const { data: runRecord } = await db.from("agent_runs")
-          .select("factual_score, token_usage")
-          .eq("id", agentData._run_id)
-          .single();
+      // ai-agent returns _quality_score and _factual_score directly
+      const qualityScore = agentData._quality_score || 0;
+      const factualScore = agentData._factual_score || 0;
 
-        if (runRecord) {
-          const factualScore = runRecord.factual_score || 0;
-          const qualityScore = (runRecord.token_usage as Record<string, unknown>)?.quality_score as number || 0;
+      console.log(`Scores - Quality: ${qualityScore}, Factual: ${factualScore} (thresholds: ${minQuality}, ${minFactual})`);
 
-          console.log(`Scores - Quality: ${qualityScore}, Factual: ${factualScore} (thresholds: ${minQuality}, ${minFactual})`);
+      if (qualityScore >= minQuality && factualScore >= minFactual && articleId) {
+        await db.from("articles").update({
+          status: "published",
+          published_at: new Date().toISOString(),
+        }).eq("id", articleId);
 
-          if (qualityScore >= minQuality && factualScore >= minFactual && articleId) {
-            await db.from("articles").update({
-              status: "published",
-              published_at: new Date().toISOString(),
-            }).eq("id", articleId);
-
-            articlesPublished++;
-            console.log(`Auto-published: "${item.topic}"`);
-          } else {
-            console.log(`Kept as draft: "${item.topic}" (Q:${qualityScore} F:${factualScore})`);
-          }
-        }
+        articlesPublished++;
+        console.log(`Auto-published: "${item.topic}"`);
+      } else {
+        console.log(`Kept as draft: "${item.topic}" (Q:${qualityScore} F:${factualScore})`);
       }
 
       // Update run progress
@@ -747,6 +716,11 @@ async function generateArticlesFromQueue(
         status: "failed",
         error_message: err instanceof Error ? err.message : String(err),
       }).eq("id", item.id);
+
+      // Update run progress on failure too
+      await db.from("nightly_builder_runs").update({
+        articles_failed: articlesFailed,
+      }).eq("id", runId);
     }
 
     // Rate limit delay between articles
@@ -773,30 +747,33 @@ serve(async (req) => {
   }
 
   try {
-    // Auth: allow service-role calls (from cron) or admin users
+    // Auth: require either service-role key or admin user
     const authHeader = req.headers.get("Authorization");
-    if (authHeader) {
-      const token = authHeader.replace("Bearer ", "");
-      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-      if (token !== serviceKey) {
-        // Verify admin
-        const userClient = createClient(
-          Deno.env.get("SUPABASE_URL")!,
-          Deno.env.get("SUPABASE_ANON_KEY")!,
-          { global: { headers: { Authorization: authHeader } } }
-        );
-        const { data: { user }, error } = await userClient.auth.getUser();
-        if (error || !user) return jsonResp({ error: "Unauthorized" }, 401);
+    if (!authHeader) {
+      return jsonResp({ error: "Unauthorized: missing Authorization header" }, 401);
+    }
 
-        const db = serviceClient();
-        const { data: roleData } = await db.from("user_roles")
-          .select("role")
-          .eq("user_id", user.id)
-          .eq("role", "admin")
-          .maybeSingle();
-        if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
-      }
+    const token = authHeader.replace("Bearer ", "");
+
+    if (token !== serviceKey) {
+      // Verify admin user
+      const userClient = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_ANON_KEY")!,
+        { global: { headers: { Authorization: authHeader } } }
+      );
+      const { data: { user }, error } = await userClient.auth.getUser();
+      if (error || !user) return jsonResp({ error: "Unauthorized" }, 401);
+
+      const db = serviceClient();
+      const { data: roleData } = await db.from("user_roles")
+        .select("role")
+        .eq("user_id", user.id)
+        .eq("role", "admin")
+        .maybeSingle();
+      if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
     }
 
     const body = await req.json().catch(() => ({}));
@@ -817,7 +794,6 @@ serve(async (req) => {
   } catch (err) {
     console.error("Nightly builder handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);
-    const status = (err as { status?: number }).status || 500;
-    return jsonResp({ error: msg }, status);
+    return jsonResp({ error: msg }, 500);
   }
 });
