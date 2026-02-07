@@ -49,6 +49,74 @@ export type Database = {
           },
         ]
       }
+      agent_runs: {
+        Row: {
+          article_id: string | null
+          completed_at: string | null
+          created_at: string
+          current_step: number
+          discovered_topics: Json | null
+          error_message: string | null
+          generated_outline: string | null
+          id: string
+          mode: string
+          model_used: string | null
+          research_notes: string | null
+          research_sources: Json | null
+          started_at: string
+          status: string
+          token_usage: Json | null
+          topic: string
+          total_steps: number
+        }
+        Insert: {
+          article_id?: string | null
+          completed_at?: string | null
+          created_at?: string
+          current_step?: number
+          discovered_topics?: Json | null
+          error_message?: string | null
+          generated_outline?: string | null
+          id?: string
+          mode?: string
+          model_used?: string | null
+          research_notes?: string | null
+          research_sources?: Json | null
+          started_at?: string
+          status?: string
+          token_usage?: Json | null
+          topic: string
+          total_steps?: number
+        }
+        Update: {
+          article_id?: string | null
+          completed_at?: string | null
+          created_at?: string
+          current_step?: number
+          discovered_topics?: Json | null
+          error_message?: string | null
+          generated_outline?: string | null
+          id?: string
+          mode?: string
+          model_used?: string | null
+          research_notes?: string | null
+          research_sources?: Json | null
+          started_at?: string
+          status?: string
+          token_usage?: Json | null
+          topic?: string
+          total_steps?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_runs_article_id_fkey"
+            columns: ["article_id"]
+            isOneToOne: false
+            referencedRelation: "articles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       articles: {
         Row: {
           ai_generated: boolean
@@ -122,6 +190,42 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      auto_generation_settings: {
+        Row: {
+          articles_per_run: number
+          created_at: string
+          enabled: boolean
+          frequency: string
+          id: string
+          last_run_at: string | null
+          next_run_at: string | null
+          target_categories: Json | null
+          updated_at: string
+        }
+        Insert: {
+          articles_per_run?: number
+          created_at?: string
+          enabled?: boolean
+          frequency?: string
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          target_categories?: Json | null
+          updated_at?: string
+        }
+        Update: {
+          articles_per_run?: number
+          created_at?: string
+          enabled?: boolean
+          frequency?: string
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          target_categories?: Json | null
+          updated_at?: string
+        }
+        Relationships: []
       }
       categories: {
         Row: {
