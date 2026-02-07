@@ -1,4 +1,8 @@
-import { Smartphone, Tablet, Monitor, AppWindow, Youtube, Share2, KeyRound, FileText, Lightbulb, type LucideIcon } from "lucide-react";
+import {
+  Smartphone, Tablet, Monitor, AppWindow, Youtube, Share2, KeyRound, FileText,
+  Lightbulb, Wifi, Shield, Mail, Camera, Headphones, Gamepad2, Globe, Tv,
+  Printer, Cloud, type LucideIcon
+} from "lucide-react";
 
 const iconMap: Record<string, LucideIcon> = {
   Smartphone,
@@ -10,6 +14,16 @@ const iconMap: Record<string, LucideIcon> = {
   KeyRound,
   FileText,
   Lightbulb,
+  Wifi,
+  Shield,
+  Mail,
+  Camera,
+  Headphones,
+  Gamepad2,
+  Globe,
+  Tv,
+  Printer,
+  Cloud,
 };
 
 const colorMap: Record<string, { color: string; bg: string }> = {
@@ -22,6 +36,16 @@ const colorMap: Record<string, { color: string; bg: string }> = {
   KeyRound: { color: "text-cat-account", bg: "bg-cat-account/10" },
   FileText: { color: "text-cat-files", bg: "bg-cat-files/10" },
   Lightbulb: { color: "text-cat-howto", bg: "bg-cat-howto/10" },
+  Wifi: { color: "text-blue-500", bg: "bg-blue-500/10" },
+  Shield: { color: "text-emerald-500", bg: "bg-emerald-500/10" },
+  Mail: { color: "text-orange-500", bg: "bg-orange-500/10" },
+  Camera: { color: "text-pink-500", bg: "bg-pink-500/10" },
+  Headphones: { color: "text-purple-500", bg: "bg-purple-500/10" },
+  Gamepad2: { color: "text-red-500", bg: "bg-red-500/10" },
+  Globe: { color: "text-cyan-500", bg: "bg-cyan-500/10" },
+  Tv: { color: "text-indigo-500", bg: "bg-indigo-500/10" },
+  Printer: { color: "text-gray-500", bg: "bg-gray-500/10" },
+  Cloud: { color: "text-sky-500", bg: "bg-sky-500/10" },
 };
 
 export function getIconComponent(iconName: string): LucideIcon {
