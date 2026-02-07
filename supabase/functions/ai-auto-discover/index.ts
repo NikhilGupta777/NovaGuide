@@ -16,12 +16,14 @@ async function callGemini(
   model: string,
   contents: unknown[],
   tools?: unknown[],
-  systemInstruction?: string
+  systemInstruction?: string,
+  toolConfig?: unknown
 ) {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
-  const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.8 } };
+  const body: Record<string, unknown> = { contents, generation_config: { temperature: 0.8 } };
   if (tools && tools.length > 0) body.tools = tools;
-  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+  if (systemInstruction) body.system_instruction = { parts: [{ text: systemInstruction }] };
+  if (toolConfig) body.tool_config = toolConfig;
 
   console.log(`Calling Gemini model: ${model}, tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : 'none'}`);
   const resp = await fetch(url, {
@@ -34,7 +36,7 @@ async function callGemini(
     const txt = await resp.text();
     console.error("Gemini API error:", resp.status, txt);
     if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Try again later." };
-    throw new Error(`Gemini API returned ${resp.status}`);
+    throw new Error(`Gemini API returned ${resp.status}: ${txt.slice(0, 200)}`);
   }
   return resp.json();
 }
@@ -133,8 +135,8 @@ Provide a detailed list of ${count} specific, actionable topics that would make 
       });
     }
 
-    // Step 2: Parse search results into structured topics (function calling ONLY, NO google_search)
-    const parseSystemPrompt = `You are a content strategist. Based on the web research below, extract exactly ${count} specific, actionable tech help topic suggestions.
+    // Step 2: Parse search results into structured topics using JSON output mode (no function calling)
+    const parsePrompt = `You are a content strategist. Based on the web research below, extract exactly ${count} specific, actionable tech help topic suggestions.
 
 AVAILABLE CATEGORIES:
 ${categoryList}
@@ -145,81 +147,71 @@ ${existingTitles || "(none yet)"}
 WEB RESEARCH RESULTS:
 ${searchResults}
 
-Each topic must be specific and actionable (not vague). Match each to the best category. You MUST respond using the discover_topics function.`;
+Return a JSON object with a "topics" array. Each topic must have:
+- "topic": specific question/problem to write about
+- "category_id": best matching category UUID from the list above
+- "priority": "high", "medium", or "low"
+- "reasoning": why this topic is valuable right now
+- "search_keywords": array of related search keywords
 
-    const parseTools = [
-      {
-        function_declarations: [{
-          name: "discover_topics",
-          description: "Return discovered topic suggestions",
-          parameters: {
-            type: "OBJECT",
-            properties: {
-              topics: {
-                type: "ARRAY",
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    topic: { type: "STRING", description: "The specific topic/question to write about" },
-                    category_id: { type: "STRING", description: "Best matching category UUID" },
-                    priority: { type: "STRING", description: "Priority: high, medium, or low" },
-                    reasoning: { type: "STRING", description: "Why this topic is valuable right now" },
-                    search_keywords: { type: "ARRAY", items: { type: "STRING" }, description: "Related search keywords" },
-                  },
-                  required: ["topic", "category_id", "priority", "reasoning"]
-                }
-              }
-            },
-            required: ["topics"]
-          }
-        }]
-      }
-    ];
+Return ONLY valid JSON, no markdown, no explanation.`;
 
-    const parseUserMsg = `Based on the research, give me exactly ${count} topic suggestions as structured data using the discover_topics function.`;
+    // Use response_mime_type to force JSON output - much more reliable than function calling
+    const parseUrl = `${GEMINI_BASE}/models/${MODEL_PARSE}:generateContent?key=${GEMINI_API_KEY}`;
+    const parseBody = {
+      contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
+      generation_config: {
+        temperature: 0.5,
+        response_mime_type: "application/json",
+      },
+    };
 
-    // Try up to 2 times for function calling
+    console.log(`Calling Gemini model: ${MODEL_PARSE}, mode: JSON output`);
+    
     let result: { topics: unknown[] } = { topics: [] };
+    
     for (let attempt = 0; attempt < 2; attempt++) {
-      const parseResp = await callGemini(GEMINI_API_KEY, MODEL_PARSE, [
-        { role: "user", parts: [{ text: parseUserMsg }] }
-      ], parseTools, parseSystemPrompt);
+      try {
+        const parseResp = await fetch(parseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(parseBody),
+        });
 
-      // Try to extract function call
-      const candidates = parseResp.candidates;
-      if (candidates?.[0]?.content?.parts) {
-        for (const part of candidates[0].content.parts) {
-          if (part.functionCall?.name === "discover_topics") {
-            result = part.functionCall.args;
-            break;
+        if (!parseResp.ok) {
+          const errText = await parseResp.text();
+          console.error(`Parse attempt ${attempt + 1} API error:`, parseResp.status, errText.slice(0, 300));
+          if (attempt === 0) {
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
           }
+          break;
         }
-      }
 
-      if (result.topics.length > 0) break;
-
-      // Fallback: try to extract JSON from text response
-      const text = extractText(parseResp);
-      console.log(`Attempt ${attempt + 1}: No function call, text length: ${text.length}`);
-      if (text.length > 0) {
-        try {
-          const jsonMatch = text.match(/\{[\s\S]*"topics"[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
+        const parseData = await parseResp.json();
+        const text = extractText(parseData);
+        console.log(`Parse attempt ${attempt + 1}: text length ${text.length}`);
+        
+        if (text.length > 0) {
+          try {
+            const parsed = JSON.parse(text);
             if (parsed.topics && Array.isArray(parsed.topics) && parsed.topics.length > 0) {
               result = parsed;
-              console.log("Extracted topics from text fallback:", result.topics.length);
+              console.log("Parsed topics successfully:", result.topics.length);
               break;
             }
+          } catch (e) {
+            console.error(`Parse attempt ${attempt + 1}: JSON parse error`, (e as Error).message);
           }
-        } catch (e) {
-          console.log("Could not parse JSON from text response");
         }
-      }
-
-      if (attempt === 0) {
-        console.log("Retrying parse step...");
-        await new Promise(r => setTimeout(r, 2000));
+        
+        if (attempt === 0) {
+          console.log("Retrying parse step...");
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      } catch (e) {
+        console.error(`Parse attempt ${attempt + 1} error:`, (e as Error).message);
+        if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
       }
     }
 
