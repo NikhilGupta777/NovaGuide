@@ -329,38 +329,44 @@ Return ONLY valid JSON, no markdown.`;
         
         await delay(2000);
         
-        // Step 5b: Parse into score (function_declarations ONLY)
-        const factResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
-          { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
-        ], [
-          { function_declarations: [{ name: "fact_check", parameters: { type: "OBJECT", properties: { factual_score: { type: "NUMBER" } }, required: ["factual_score"] } }] }
-        ], "Parse the fact-check results. Return a factual_score 0-10 using the fact_check function.");
-        const factArgs = extractFunctionCall(factResp);
-        const factualScore = Math.round((factArgs?.factual_score as number) || 7);
+        // Step 5b: Parse into factual score using JSON output mode (reliable)
+        const factParseUrl = `${GEMINI_BASE}/models/${MODEL_RESEARCH}:generateContent?key=${GEMINI_API_KEY}`;
+        const factParseResp = await fetch(factParseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: `Based on this fact-check analysis, rate the factual accuracy on a scale of 0-10.\n\n${verificationText}\n\nReturn JSON with: {"factual_score": <number 0-10>}` }] }],
+            generation_config: { temperature: 0.2, response_mime_type: "application/json" },
+          }),
+        });
+        let factualScore = 7;
+        if (factParseResp.ok) {
+          const factData = await factParseResp.json();
+          const factText = extractText(factData);
+          try { factualScore = Math.round(JSON.parse(factText).factual_score) || 7; } catch { /* default 7 */ }
+        }
         await db.from("agent_runs").update({ factual_score: factualScore }).eq("id", runId);
 
         await delay(3000);
 
-        // Step 6: Quality gate (3 Flash - smart)
+        // Step 6: Quality gate using JSON output mode (reliable)
         await db.from("agent_runs").update({ status: "optimizing", current_step: 6 }).eq("id", runId);
-        const qualResp = await callGemini(GEMINI_API_KEY, MODEL_FAST, [
-          { role: "user", parts: [{ text: `Review quality:\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}` }] }
-        ], [{
-          function_declarations: [{
-            name: "quality_review",
-            parameters: {
-              type: "OBJECT",
-              properties: {
-                quality_score: { type: "NUMBER" },
-                improved_seo_title: { type: "STRING" },
-                improved_seo_description: { type: "STRING" }
-              },
-              required: ["quality_score"]
-            }
-          }]
-        }], "Rate quality 0-10 and improve SEO.");
-        const qualArgs = extractFunctionCall(qualResp);
-        const qualityScore = Math.round((qualArgs?.quality_score as number) || 7);
+        const qualParseUrl = `${GEMINI_BASE}/models/${MODEL_FAST}:generateContent?key=${GEMINI_API_KEY}`;
+        const qualParseResp = await fetch(qualParseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: `Review this article's quality for a beginner-friendly tech help site. Rate quality 0-10 and suggest improved SEO.\n\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}\n\nReturn JSON: {"quality_score": <number>, "improved_seo_title": "<string under 60 chars>", "improved_seo_description": "<string under 160 chars>"}` }] }],
+            generation_config: { temperature: 0.3, response_mime_type: "application/json" },
+          }),
+        });
+        let qualityScore = 7;
+        let qualArgs: Record<string, unknown> = {};
+        if (qualParseResp.ok) {
+          const qualData = await qualParseResp.json();
+          const qualText = extractText(qualData);
+          try { qualArgs = JSON.parse(qualText); qualityScore = Math.round(qualArgs.quality_score as number) || 7; } catch { /* default 7 */ }
+        }
         const articleStatus = qualityScore < 7 ? "needs_review" : "draft";
 
         if (qualArgs?.improved_seo_title) article.seo_title = qualArgs.improved_seo_title;

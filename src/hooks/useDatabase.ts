@@ -116,12 +116,15 @@ export function useSearchArticles(query: string) {
       return;
     }
     setLoading(true);
+    // Sanitize query: escape special Postgres LIKE chars and limit length
+    const sanitized = query.trim().slice(0, 200).replace(/%/g, "\\%").replace(/_/g, "\\_");
     supabase
       .from("articles")
       .select("*")
       .eq("status", "published")
-      .or(`title.ilike.%${query}%,excerpt.ilike.%${query}%`)
+      .or(`title.ilike.%${sanitized}%,excerpt.ilike.%${sanitized}%`)
       .order("published_at", { ascending: false })
+      .limit(50)
       .then(({ data }) => {
         if (data) setArticles(data);
         setLoading(false);
