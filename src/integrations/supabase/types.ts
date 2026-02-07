@@ -14,16 +14,523 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      agent_logs: {
+        Row: {
+          action: string | null
+          article_id: string | null
+          created_at: string | null
+          details: Json | null
+          id: string
+          status: string | null
+        }
+        Insert: {
+          action?: string | null
+          article_id?: string | null
+          created_at?: string | null
+          details?: Json | null
+          id?: string
+          status?: string | null
+        }
+        Update: {
+          action?: string | null
+          article_id?: string | null
+          created_at?: string | null
+          details?: Json | null
+          id?: string
+          status?: string | null
+        }
+        Relationships: []
+      }
+      agent_runs: {
+        Row: {
+          article_id: string | null
+          completed_at: string | null
+          created_at: string | null
+          current_step: number | null
+          error_message: string | null
+          factual_score: number | null
+          generated_outline: string | null
+          id: string
+          mode: string | null
+          model_used: string | null
+          quality_score: number | null
+          research_notes: string | null
+          research_sources: Json | null
+          started_at: string | null
+          status: string | null
+          token_usage: Json | null
+          topic: string | null
+          total_steps: number | null
+        }
+        Insert: {
+          article_id?: string | null
+          completed_at?: string | null
+          created_at?: string | null
+          current_step?: number | null
+          error_message?: string | null
+          factual_score?: number | null
+          generated_outline?: string | null
+          id?: string
+          mode?: string | null
+          model_used?: string | null
+          quality_score?: number | null
+          research_notes?: string | null
+          research_sources?: Json | null
+          started_at?: string | null
+          status?: string | null
+          token_usage?: Json | null
+          topic?: string | null
+          total_steps?: number | null
+        }
+        Update: {
+          article_id?: string | null
+          completed_at?: string | null
+          created_at?: string | null
+          current_step?: number | null
+          error_message?: string | null
+          factual_score?: number | null
+          generated_outline?: string | null
+          id?: string
+          mode?: string | null
+          model_used?: string | null
+          quality_score?: number | null
+          research_notes?: string | null
+          research_sources?: Json | null
+          started_at?: string | null
+          status?: string | null
+          token_usage?: Json | null
+          topic?: string | null
+          total_steps?: number | null
+        }
+        Relationships: []
+      }
+      articles: {
+        Row: {
+          ai_generated: boolean | null
+          author_id: string | null
+          category_id: string | null
+          content: string | null
+          created_at: string | null
+          excerpt: string | null
+          featured: boolean | null
+          id: string
+          published_at: string | null
+          read_time: number | null
+          seo_description: string | null
+          seo_title: string | null
+          slug: string
+          sources: Json | null
+          status: string | null
+          tags: string[] | null
+          title: string
+          updated_at: string | null
+        }
+        Insert: {
+          ai_generated?: boolean | null
+          author_id?: string | null
+          category_id?: string | null
+          content?: string | null
+          created_at?: string | null
+          excerpt?: string | null
+          featured?: boolean | null
+          id?: string
+          published_at?: string | null
+          read_time?: number | null
+          seo_description?: string | null
+          seo_title?: string | null
+          slug: string
+          sources?: Json | null
+          status?: string | null
+          tags?: string[] | null
+          title: string
+          updated_at?: string | null
+        }
+        Update: {
+          ai_generated?: boolean | null
+          author_id?: string | null
+          category_id?: string | null
+          content?: string | null
+          created_at?: string | null
+          excerpt?: string | null
+          featured?: boolean | null
+          id?: string
+          published_at?: string | null
+          read_time?: number | null
+          seo_description?: string | null
+          seo_title?: string | null
+          slug?: string
+          sources?: Json | null
+          status?: string | null
+          tags?: string[] | null
+          title?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "articles_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      auto_generation_settings: {
+        Row: {
+          articles_per_run: number | null
+          created_at: string | null
+          enabled: boolean | null
+          frequency: string | null
+          id: string
+          last_run_at: string | null
+          next_run_at: string | null
+          target_categories: string[] | null
+          updated_at: string | null
+        }
+        Insert: {
+          articles_per_run?: number | null
+          created_at?: string | null
+          enabled?: boolean | null
+          frequency?: string | null
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          target_categories?: string[] | null
+          updated_at?: string | null
+        }
+        Update: {
+          articles_per_run?: number | null
+          created_at?: string | null
+          enabled?: boolean | null
+          frequency?: string | null
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          target_categories?: string[] | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      categories: {
+        Row: {
+          article_count: number | null
+          created_at: string | null
+          description: string | null
+          icon: string | null
+          id: string
+          name: string
+          slug: string
+          sort_order: number | null
+          updated_at: string | null
+        }
+        Insert: {
+          article_count?: number | null
+          created_at?: string | null
+          description?: string | null
+          icon?: string | null
+          id?: string
+          name: string
+          slug: string
+          sort_order?: number | null
+          updated_at?: string | null
+        }
+        Update: {
+          article_count?: number | null
+          created_at?: string | null
+          description?: string | null
+          icon?: string | null
+          id?: string
+          name?: string
+          slug?: string
+          sort_order?: number | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      content_audit_findings: {
+        Row: {
+          article_id: string | null
+          article_title: string | null
+          auto_fixed: boolean | null
+          created_at: string | null
+          description: string
+          fix_applied: string | null
+          id: string
+          issue_type: string
+          related_article_id: string | null
+          related_article_title: string | null
+          run_id: string
+          severity: string | null
+          status: string | null
+          suggestion: string | null
+        }
+        Insert: {
+          article_id?: string | null
+          article_title?: string | null
+          auto_fixed?: boolean | null
+          created_at?: string | null
+          description: string
+          fix_applied?: string | null
+          id?: string
+          issue_type: string
+          related_article_id?: string | null
+          related_article_title?: string | null
+          run_id: string
+          severity?: string | null
+          status?: string | null
+          suggestion?: string | null
+        }
+        Update: {
+          article_id?: string | null
+          article_title?: string | null
+          auto_fixed?: boolean | null
+          created_at?: string | null
+          description?: string
+          fix_applied?: string | null
+          id?: string
+          issue_type?: string
+          related_article_id?: string | null
+          related_article_title?: string | null
+          run_id?: string
+          severity?: string | null
+          status?: string | null
+          suggestion?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "content_audit_findings_article_id_fkey"
+            columns: ["article_id"]
+            isOneToOne: false
+            referencedRelation: "articles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "content_audit_findings_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "content_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      content_audit_runs: {
+        Row: {
+          articles_set_to_draft: number | null
+          auto_fixes_applied: number | null
+          completed_at: string | null
+          created_at: string | null
+          duplicates_found: number | null
+          error_message: string | null
+          id: string
+          started_at: string | null
+          status: string | null
+          total_articles_scanned: number | null
+          total_issues_found: number | null
+        }
+        Insert: {
+          articles_set_to_draft?: number | null
+          auto_fixes_applied?: number | null
+          completed_at?: string | null
+          created_at?: string | null
+          duplicates_found?: number | null
+          error_message?: string | null
+          id?: string
+          started_at?: string | null
+          status?: string | null
+          total_articles_scanned?: number | null
+          total_issues_found?: number | null
+        }
+        Update: {
+          articles_set_to_draft?: number | null
+          auto_fixes_applied?: number | null
+          completed_at?: string | null
+          created_at?: string | null
+          duplicates_found?: number | null
+          error_message?: string | null
+          id?: string
+          started_at?: string | null
+          status?: string | null
+          total_articles_scanned?: number | null
+          total_issues_found?: number | null
+        }
+        Relationships: []
+      }
+      nightly_builder_queue: {
+        Row: {
+          article_id: string | null
+          batch_number: number | null
+          category_id: string | null
+          created_at: string | null
+          error_message: string | null
+          id: string
+          priority: number | null
+          run_date: string | null
+          status: string | null
+          topic: string
+        }
+        Insert: {
+          article_id?: string | null
+          batch_number?: number | null
+          category_id?: string | null
+          created_at?: string | null
+          error_message?: string | null
+          id?: string
+          priority?: number | null
+          run_date?: string | null
+          status?: string | null
+          topic: string
+        }
+        Update: {
+          article_id?: string | null
+          batch_number?: number | null
+          category_id?: string | null
+          created_at?: string | null
+          error_message?: string | null
+          id?: string
+          priority?: number | null
+          run_date?: string | null
+          status?: string | null
+          topic?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "nightly_builder_queue_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      nightly_builder_runs: {
+        Row: {
+          articles_failed: number | null
+          articles_generated: number | null
+          articles_published: number | null
+          batch_number: number | null
+          categories_created: number | null
+          completed_at: string | null
+          created_at: string | null
+          details: Json | null
+          error_message: string | null
+          id: string
+          started_at: string | null
+          status: string | null
+          total_after_dedup: number | null
+          total_categories_processed: number | null
+          total_topics_found: number | null
+        }
+        Insert: {
+          articles_failed?: number | null
+          articles_generated?: number | null
+          articles_published?: number | null
+          batch_number?: number | null
+          categories_created?: number | null
+          completed_at?: string | null
+          created_at?: string | null
+          details?: Json | null
+          error_message?: string | null
+          id?: string
+          started_at?: string | null
+          status?: string | null
+          total_after_dedup?: number | null
+          total_categories_processed?: number | null
+          total_topics_found?: number | null
+        }
+        Update: {
+          articles_failed?: number | null
+          articles_generated?: number | null
+          articles_published?: number | null
+          batch_number?: number | null
+          categories_created?: number | null
+          completed_at?: string | null
+          created_at?: string | null
+          details?: Json | null
+          error_message?: string | null
+          id?: string
+          started_at?: string | null
+          status?: string | null
+          total_after_dedup?: number | null
+          total_categories_processed?: number | null
+          total_topics_found?: number | null
+        }
+        Relationships: []
+      }
+      nightly_builder_settings: {
+        Row: {
+          allow_category_creation: boolean | null
+          auto_publish_min_factual: number | null
+          auto_publish_min_quality: number | null
+          created_at: string | null
+          enabled: boolean | null
+          id: string
+          last_run_at: string | null
+          next_run_at: string | null
+          stop_requested: boolean | null
+          topics_per_category: number | null
+          updated_at: string | null
+        }
+        Insert: {
+          allow_category_creation?: boolean | null
+          auto_publish_min_factual?: number | null
+          auto_publish_min_quality?: number | null
+          created_at?: string | null
+          enabled?: boolean | null
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          stop_requested?: boolean | null
+          topics_per_category?: number | null
+          updated_at?: string | null
+        }
+        Update: {
+          allow_category_creation?: boolean | null
+          auto_publish_min_factual?: number | null
+          auto_publish_min_quality?: number | null
+          created_at?: string | null
+          enabled?: boolean | null
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          stop_requested?: boolean | null
+          topics_per_category?: number | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      user_roles: {
+        Row: {
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin" | "moderator" | "user"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +657,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin", "moderator", "user"],
+    },
   },
 } as const
