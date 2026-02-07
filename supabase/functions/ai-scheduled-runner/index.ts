@@ -8,8 +8,13 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash";
-const MODEL_PRO = "gemini-2.5-pro";
+
+// ── Optimal Model Strategy ────────────────────────────────────────────
+const MODEL_LITE = "gemini-2.5-flash-lite"; // Cheapest: dup check, parsing
+const MODEL_RESEARCH = "gemini-2.5-flash";   // Stable grounding: research, fact-check, discovery
+const MODEL_FAST = "gemini-3-flash-preview"; // Smart: outline, quality gate
+const MODEL_PRO = "gemini-3-pro-preview";    // Best: writing
+const MODEL_PRO_FALLBACK = "gemini-3-flash-preview";
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -22,6 +27,7 @@ async function callGemini(apiKey: string, model: string, contents: unknown[], to
   if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
   body.generationConfig = { temperature: 0.7 };
 
+  console.log(`Calling Gemini model: ${model}`);
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -30,9 +36,33 @@ async function callGemini(apiKey: string, model: string, contents: unknown[], to
 
   if (!resp.ok) {
     const txt = await resp.text();
+    console.error(`Gemini error (${model}): ${resp.status}`, txt.substring(0, 200));
+    if (resp.status === 429) throw { status: 429, message: `Rate limit on ${model}`, model };
     throw new Error(`Gemini API ${model}: ${resp.status} - ${txt.substring(0, 200)}`);
   }
   return resp.json();
+}
+
+// Auto-fallback: tries primary, falls back on 429
+async function callGeminiWithFallback(
+  apiKey: string,
+  primaryModel: string,
+  fallbackModel: string,
+  contents: unknown[],
+  tools?: unknown[],
+  systemInstruction?: string
+) {
+  try {
+    return await callGemini(apiKey, primaryModel, contents, tools, systemInstruction);
+  } catch (err: unknown) {
+    const e = err as { status?: number };
+    if (e.status === 429) {
+      console.log(`${primaryModel} rate limited → falling back to ${fallbackModel}`);
+      await delay(2000);
+      return await callGemini(apiKey, fallbackModel, contents, tools, systemInstruction);
+    }
+    throw err;
+  }
 }
 
 function extractText(response: Record<string, unknown>): string {
@@ -93,14 +123,13 @@ serve(async (req) => {
     const articlesPerRun = settings.articles_per_run || 3;
     const targetCategories = (settings.target_categories as string[]) || [];
 
-    console.log(`Scheduled runner: Starting autonomous run. Articles: ${articlesPerRun}`);
+    console.log(`Scheduled runner: Starting. Articles: ${articlesPerRun}, Models: Pro=${MODEL_PRO}, Research=${MODEL_RESEARCH}`);
 
     // Update last_run_at
     await db.from("auto_generation_settings").update({
       last_run_at: new Date().toISOString(),
     }).eq("id", settings.id);
 
-    // Log start
     await db.from("agent_logs").insert({
       action: `Scheduled run started: ${articlesPerRun} articles`,
       status: "started",
@@ -116,19 +145,34 @@ serve(async (req) => {
     const categories = categoriesRes.data || [];
     const existingTitles = (articlesRes.data || []).map(a => a.title);
 
-    // Step 1: Discover topics with Google Search Grounding
+    // ── Step 1: Discover topics with Google Search (2 separate calls) ──
+
     const categoryList = categories.map(c => `${c.name} (ID: ${c.id}): ${c.description || "General"}`).join("\n");
     const existingList = existingTitles.map(t => `- ${t}`).join("\n");
     const catFilter = targetCategories.length > 0
       ? `Focus on: ${targetCategories.map(id => categories.find(c => c.id === id)?.name || id).join(", ")}`
       : "Cover a variety of categories";
 
-    const discoverResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-      { role: "user", parts: [{ text: `Discover ${articlesPerRun} trending tech help topics. Search the web for what people need help with right now.` }] }
+    // Step 1a: Search web for trending topics (google_search ONLY, no function_declarations)
+    console.log("Step 1a: Searching web for trending topics...");
+    const searchResp = await callGemini(GEMINI_API_KEY, MODEL_RESEARCH, [
+      { role: "user", parts: [{ text: `Search the web and discover ${articlesPerRun} trending tech help topics that would attract organic search traffic. What are people actually searching for help with right now? Be specific and detailed.` }] }
     ], [
-      { googleSearch: {} },
+      { google_search: {} }
+    ], `You are a content strategist for a tech help website.\n${catFilter}\n\nEXISTING ARTICLES (avoid duplicates):\n${existingList}`);
+
+    const searchResults = extractText(searchResp);
+    console.log("Search results length:", searchResults.length);
+
+    await delay(2000);
+
+    // Step 1b: Parse into structured topics (function_declarations ONLY, no google_search)
+    console.log("Step 1b: Parsing topics into structured data...");
+    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
+      { role: "user", parts: [{ text: `Based on this research, extract exactly ${articlesPerRun} topic suggestions using the discover_topics function:\n\n${searchResults}` }] }
+    ], [
       {
-        functionDeclarations: [{
+        function_declarations: [{
           name: "discover_topics",
           description: "Return topic suggestions",
           parameters: {
@@ -151,9 +195,9 @@ serve(async (req) => {
           }
         }]
       }
-    ], `You are a content strategist. CATEGORIES:\n${categoryList}\n\nEXISTING:\n${existingList}\n\n${catFilter}\n\nFind topics people are searching for RIGHT NOW.`);
+    ], `CATEGORIES:\n${categoryList}\n\nExtract structured topics from the research.`);
 
-    const discoverArgs = extractFunctionCall(discoverResp);
+    const discoverArgs = extractFunctionCall(parseResp);
     const topics = (discoverArgs?.topics as { topic: string; category_id: string; priority: string }[]) || [];
 
     if (topics.length === 0) {
@@ -168,12 +212,12 @@ serve(async (req) => {
       });
     }
 
-    console.log(`Discovered ${topics.length} topics, processing...`);
+    console.log(`Discovered ${topics.length} topics, processing through pipeline...`);
 
     let successCount = 0;
     let failCount = 0;
 
-    // Process each topic through the full pipeline
+    // ── Process each topic through the full 6-step pipeline ──
     for (let i = 0; i < Math.min(topics.length, articlesPerRun); i++) {
       const t = topics[i];
       console.log(`\n--- Processing topic ${i + 1}/${topics.length}: "${t.topic}" ---`);
@@ -186,17 +230,17 @@ serve(async (req) => {
           status: "checking",
           current_step: 1,
           total_steps: 6,
-          model_used: `${MODEL_FLASH}/${MODEL_PRO}`,
+          model_used: `${MODEL_PRO}→${MODEL_PRO_FALLBACK}`,
         }).select().single();
 
         if (!run) throw new Error("Failed to create run record");
         const runId = run.id;
 
-        // Duplicate check
-        const dupResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-          { role: "user", parts: [{ text: `Is "${t.topic}" too similar to any of these?\n${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}\n\nRespond with the check_duplicate function.` }] }
+        // Step 1: Duplicate check (Flash Lite - cheapest)
+        const dupResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
+          { role: "user", parts: [{ text: `Is "${t.topic}" too similar to any of these?\n${existingTitles.map((title, idx) => `${idx + 1}. ${title}`).join("\n")}\n\nRespond with the check_duplicate function.` }] }
         ], [{
-          functionDeclarations: [{
+          function_declarations: [{
             name: "check_duplicate",
             parameters: {
               type: "OBJECT",
@@ -211,18 +255,18 @@ serve(async (req) => {
 
         const dupArgs = extractFunctionCall(dupResp);
         if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 80) {
-          console.log(`Skipping duplicate topic: "${t.topic}"`);
+          console.log(`Skipping duplicate: "${t.topic}"`);
           await db.from("agent_runs").update({ status: "skipped", error_message: "Duplicate topic", completed_at: new Date().toISOString() }).eq("id", runId);
           continue;
         }
 
         await delay(3000);
 
-        // Research with grounding
+        // Step 2: Research with Google Search grounding (2.5 Flash - stable grounding)
         await db.from("agent_runs").update({ status: "researching", current_step: 2 }).eq("id", runId);
-        const researchResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-          { role: "user", parts: [{ text: `Research thoroughly: "${t.topic}"` }] }
-        ], [{ googleSearch: {} }], "You are a research analyst. Provide comprehensive research notes of 500-800 words.");
+        const researchResp = await callGemini(GEMINI_API_KEY, MODEL_RESEARCH, [
+          { role: "user", parts: [{ text: `Research thoroughly: "${t.topic}". Find current, accurate information from the web.` }] }
+        ], [{ google_search: {} }], "You are a research analyst. Provide comprehensive research notes of 500-800 words using real web data.");
 
         const research = extractText(researchResp);
         const sources = extractGroundingSources(researchResp);
@@ -230,23 +274,23 @@ serve(async (req) => {
 
         await delay(3000);
 
-        // Outline
+        // Step 3: Outline (3 Flash - smart + fast)
         await db.from("agent_runs").update({ status: "outlining", current_step: 3 }).eq("id", runId);
-        const outlineResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
-          { role: "user", parts: [{ text: `Create an article outline for: "${t.topic}"\n\nResearch:\n${research}` }] }
-        ], undefined, "Create a structured article outline.");
+        const outlineResp = await callGemini(GEMINI_API_KEY, MODEL_FAST, [
+          { role: "user", parts: [{ text: `Create a detailed article outline for: "${t.topic}"\n\nResearch:\n${research}` }] }
+        ], undefined, "Create a structured article outline with clear sections.");
         const outline = extractText(outlineResp);
         await db.from("agent_runs").update({ generated_outline: outline }).eq("id", runId);
 
         await delay(3000);
 
-        // Write (Pro model)
+        // Step 4: Write article (3 Pro → fallback to 3 Flash)
         await db.from("agent_runs").update({ status: "writing", current_step: 4 }).eq("id", runId);
         const catList = categories.map(c => `${c.name} (ID: ${c.id})`).join(", ");
-        const writeResp = await callGemini(GEMINI_API_KEY, MODEL_PRO, [
+        const writeResp = await callGeminiWithFallback(GEMINI_API_KEY, MODEL_PRO, MODEL_PRO_FALLBACK, [
           { role: "user", parts: [{ text: `Write a complete beginner-friendly help article about: "${t.topic}"` }] }
         ], [{
-          functionDeclarations: [{
+          function_declarations: [{
             name: "generate_article",
             parameters: {
               type: "OBJECT",
@@ -266,22 +310,22 @@ serve(async (req) => {
 
         await delay(3000);
 
-        // Fact check - Step 5a: Search web to verify (Google Search only)
+        // Step 5a: Fact check - Search web (google_search ONLY)
         await db.from("agent_runs").update({ status: "verifying", current_step: 5 }).eq("id", runId);
-        const factSearchResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+        const factSearchResp = await callGemini(GEMINI_API_KEY, MODEL_RESEARCH, [
           { role: "user", parts: [{ text: `Verify the key factual claims in this article by searching the web:\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}\n\nList each claim and whether it's verified or not.` }] }
         ], [
-          { googleSearch: {} }
+          { google_search: {} }
         ], "Fact-check the key claims using web search.");
         const verificationText = extractText(factSearchResp);
         
         await delay(2000);
         
-        // Step 5b: Parse into score (function calling only)
-        const factResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+        // Step 5b: Parse into score (function_declarations ONLY)
+        const factResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
           { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
         ], [
-          { functionDeclarations: [{ name: "fact_check", parameters: { type: "OBJECT", properties: { factual_score: { type: "NUMBER" } }, required: ["factual_score"] } }] }
+          { function_declarations: [{ name: "fact_check", parameters: { type: "OBJECT", properties: { factual_score: { type: "NUMBER" } }, required: ["factual_score"] } }] }
         ], "Parse the fact-check results. Return a factual_score 0-10 using the fact_check function.");
         const factArgs = extractFunctionCall(factResp);
         const factualScore = Math.round((factArgs?.factual_score as number) || 7);
@@ -289,12 +333,12 @@ serve(async (req) => {
 
         await delay(3000);
 
-        // Quality gate
+        // Step 6: Quality gate (3 Flash - smart)
         await db.from("agent_runs").update({ status: "optimizing", current_step: 6 }).eq("id", runId);
-        const qualResp = await callGemini(GEMINI_API_KEY, MODEL_FLASH, [
+        const qualResp = await callGemini(GEMINI_API_KEY, MODEL_FAST, [
           { role: "user", parts: [{ text: `Review quality:\nTitle: ${article.title}\nContent: ${(article.content as string).substring(0, 4000)}` }] }
         ], [{
-          functionDeclarations: [{
+          function_declarations: [{
             name: "quality_review",
             parameters: {
               type: "OBJECT",
@@ -366,7 +410,7 @@ serve(async (req) => {
     await db.from("agent_logs").insert({
       action: `Scheduled run completed: ${successCount} success, ${failCount} failed`,
       status: "completed",
-      details: { success: successCount, failed: failCount, total_topics: topics.length },
+      details: { success: successCount, failed: failCount, total_topics: topics.length, models: { pro: MODEL_PRO, research: MODEL_RESEARCH, fast: MODEL_FAST, lite: MODEL_LITE } },
     });
 
     console.log(`\nScheduled run complete: ${successCount} success, ${failCount} failed. Next run: ${nextRunAt}`);
