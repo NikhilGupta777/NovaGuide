@@ -3,7 +3,7 @@ import { BookOpen, Menu, X } from "lucide-react";
 import { useState } from "react";
 import SearchBar from "./SearchBar";
 import AdPlaceholder from "./AdPlaceholder";
-import { categories } from "@/data/categories";
+import { useCategories } from "@/hooks/useDatabase";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -12,6 +12,7 @@ interface LayoutProps {
 
 const Layout = ({ children, hideHeaderAd = false }: LayoutProps) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { categories } = useCategories();
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -46,6 +47,9 @@ const Layout = ({ children, hideHeaderAd = false }: LayoutProps) => {
             <Link to="/about" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
               About
             </Link>
+            <Link to="/contact" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
+              Contact
+            </Link>
           </nav>
 
           <div className="hidden md:block w-64">
@@ -76,19 +80,24 @@ const Layout = ({ children, hideHeaderAd = false }: LayoutProps) => {
               <Link to="/about" onClick={() => setMobileMenuOpen(false)} className="py-2 text-sm font-medium text-foreground">
                 About
               </Link>
-              <div className="border-t border-border pt-2 mt-2">
-                <p className="text-xs text-muted-foreground mb-2">Browse by category</p>
-                {categories.slice(0, 6).map((cat) => (
-                  <Link
-                    key={cat.id}
-                    to={`/category/${cat.slug}`}
-                    onClick={() => setMobileMenuOpen(false)}
-                    className="block py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    {cat.name}
-                  </Link>
-                ))}
-              </div>
+              <Link to="/contact" onClick={() => setMobileMenuOpen(false)} className="py-2 text-sm font-medium text-foreground">
+                Contact
+              </Link>
+              {categories.length > 0 && (
+                <div className="border-t border-border pt-2 mt-2">
+                  <p className="text-xs text-muted-foreground mb-2">Browse by category</p>
+                  {categories.slice(0, 6).map((cat) => (
+                    <Link
+                      key={cat.id}
+                      to={`/category/${cat.slug}`}
+                      onClick={() => setMobileMenuOpen(false)}
+                      className="block py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {cat.name}
+                    </Link>
+                  ))}
+                </div>
+              )}
             </nav>
           </div>
         )}

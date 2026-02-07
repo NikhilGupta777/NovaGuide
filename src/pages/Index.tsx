@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { ArrowRight, Loader2 } from "lucide-react";
 import Layout from "@/components/Layout";
+import SEOHead from "@/components/SEOHead";
 import SearchBar from "@/components/SearchBar";
 import CategoryCard from "@/components/CategoryCard";
 import ArticleCard from "@/components/ArticleCard";
@@ -15,6 +16,7 @@ const Index = () => {
 
   return (
     <Layout hideHeaderAd>
+      <SEOHead />
       {/* Hero Section */}
       <section className="hero-gradient relative overflow-hidden">
         <div className="absolute inset-0 opacity-10">
