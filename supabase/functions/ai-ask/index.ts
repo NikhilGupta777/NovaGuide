@@ -55,7 +55,7 @@ serve(async (req) => {
       );
     }
 
-    const { question } = await req.json();
+    const { question, conversationHistory } = await req.json();
     if (!question || typeof question !== "string" || question.trim().length < 3) {
       return new Response(
         JSON.stringify({ error: "Please provide a valid question (at least 3 characters)." }),
@@ -64,6 +64,17 @@ serve(async (req) => {
     }
 
     const trimmedQuestion = question.trim().slice(0, 500);
+
+    // Build conversation context from history (last 10 messages max)
+    const history: { role: string; content: string }[] = Array.isArray(conversationHistory)
+      ? conversationHistory
+          .filter((m: { role?: string; content?: string }) => m.role && m.content)
+          .slice(-10)
+          .map((m: { role: string; content: string }) => ({
+            role: m.role === "user" ? "user" : "assistant",
+            content: m.content.slice(0, 500),
+          }))
+      : [];
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
     if (!GEMINI_API_KEY) {
       return new Response(
@@ -140,26 +151,44 @@ Respond in JSON format:
   "suggestedTopic": "Topic for new article if shouldCreateArticle is true"
 }`;
 
+    // Build Gemini contents array with conversation history
+    const geminiContents: { role: string; parts: { text: string }[] }[] = [];
+
+    // Add conversation history as alternating user/model turns
+    if (history.length > 0) {
+      for (const msg of history) {
+        geminiContents.push({
+          role: msg.role === "user" ? "user" : "model",
+          parts: [{ text: msg.content }],
+        });
+      }
+    }
+
+    // Add current question with article context
+    geminiContents.push({
+      role: "user",
+      parts: [
+        {
+          text: `User question: "${trimmedQuestion}"
+
+Here are the articles currently published on our website:
+${articleContext}
+
+Analyze the question and articles, then respond in the required JSON format.${
+            history.length > 0
+              ? "\n\nIMPORTANT: Consider the conversation history above for context. The user may be asking a follow-up question referring to previous messages."
+              : ""
+          }`,
+        },
+      ],
+    });
+
     const url = `${GEMINI_BASE}/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                text: `User question: "${trimmedQuestion}"
-
-Here are the articles currently published on our website:
-${articleContext}
-
-Analyze the question and articles, then respond in the required JSON format.`,
-              },
-            ],
-          },
-        ],
+        contents: geminiContents,
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
           temperature: 0.4,

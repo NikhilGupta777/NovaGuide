@@ -74,8 +74,14 @@ const AskAISection = () => {
     setIsLoading(true);
 
     try {
+      // Build conversation history for context (exclude current question)
+      const conversationHistory = messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+
       const { data, error } = await supabase.functions.invoke("ai-ask", {
-        body: { question },
+        body: { question, conversationHistory },
       });
 
       // supabase.functions.invoke puts non-2xx responses in error
