@@ -107,16 +107,22 @@ export default function AIAgentPanel() {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<PipelineRun | null>(null);
   const [pollingRunId, setPollingRunId] = useState<string | null>(null);
+  const [runsLimit, setRunsLimit] = useState(7);
+  const [hasMoreRuns, setHasMoreRuns] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Load recent pipeline runs
-  const fetchRuns = useCallback(async () => {
-    const { data } = await supabase
+  const fetchRuns = useCallback(async (limit = runsLimit) => {
+    const { data, count } = await supabase
       .from("agent_runs")
-      .select("*")
+      .select("*", { count: "exact" })
       .order("created_at", { ascending: false })
-      .limit(20);
-    if (data) setRuns(data as unknown as PipelineRun[]);
-  }, []);
+      .limit(limit);
+    if (data) {
+      setRuns(data as unknown as PipelineRun[]);
+      setHasMoreRuns((count ?? 0) > limit);
+    }
+  }, [runsLimit]);
 
   // Load automation settings
   const fetchAutoSettings = useCallback(async () => {
@@ -798,7 +804,7 @@ export default function AIAgentPanel() {
             <div className="bg-card border border-border rounded-xl p-5">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground">Pipeline History</h3>
-                <button onClick={fetchRuns} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors">
+                <button onClick={() => fetchRuns()} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors">
                   <RefreshCw className="h-4 w-4" />
                 </button>
               </div>
@@ -809,7 +815,7 @@ export default function AIAgentPanel() {
                   <p className="text-sm">No pipeline runs yet. Generate your first article!</p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-[500px] overflow-y-auto">
+                <div className="space-y-2">
                   {runs.map((run) => (
                     <button
                       key={run.id}
@@ -840,6 +846,31 @@ export default function AIAgentPanel() {
                       </div>
                     </button>
                   ))}
+                  {hasMoreRuns && (
+                    <button
+                      onClick={async () => {
+                        setLoadingMore(true);
+                        const newLimit = runsLimit + 10;
+                        setRunsLimit(newLimit);
+                        await fetchRuns(newLimit);
+                        setLoadingMore(false);
+                      }}
+                      disabled={loadingMore}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+                    >
+                      {loadingMore ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Loading...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Load More
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
