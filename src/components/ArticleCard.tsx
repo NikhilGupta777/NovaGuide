@@ -20,8 +20,9 @@ const ArticleCard = ({ article, categories = [], variant = "default" }: ArticleC
     return (
       <Link
         to={`/article/${article.slug}`}
-        className="group block p-6 rounded-xl bg-card border border-border card-elevated"
+        className="group block p-6 rounded-xl bg-card border border-border card-elevated relative overflow-hidden"
       >
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary/60 to-accent/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
         <div className="flex items-center gap-2 mb-3">
           {category && colors && (
             <span className={`category-badge ${colors.bg} ${colors.color}`}>
@@ -36,10 +37,10 @@ const ArticleCard = ({ article, categories = [], variant = "default" }: ArticleC
         <h3 className="text-lg font-semibold text-card-foreground mb-2 group-hover:text-primary transition-colors leading-snug">
           {article.title}
         </h3>
-        <p className="text-sm text-muted-foreground leading-relaxed mb-4">
+        <p className="text-sm text-muted-foreground leading-relaxed mb-4 line-clamp-3">
           {article.excerpt}
         </p>
-        <span className="inline-flex items-center gap-1 text-sm font-medium text-primary group-hover:gap-2 transition-all">
+        <span className="inline-flex items-center gap-1.5 text-sm font-medium text-primary group-hover:gap-2.5 transition-all">
           Read guide <ArrowRight className="h-4 w-4" />
         </span>
       </Link>
