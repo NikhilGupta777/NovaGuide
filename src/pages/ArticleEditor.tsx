@@ -80,8 +80,14 @@ const ArticleEditor = () => {
   };
 
   const handleSave = async (publishNow = false) => {
-    if (!form.title.trim() || !form.slug.trim()) {
-      toast({ title: "Error", description: "Title and slug are required.", variant: "destructive" });
+    if (!form.title.trim()) {
+      toast({ title: "Error", description: "Title is required.", variant: "destructive" });
+      return;
+    }
+
+    const slug = form.slug.trim() || generateSlug(form.title);
+    if (!slug) {
+      toast({ title: "Error", description: "Could not generate a valid slug.", variant: "destructive" });
       return;
     }
 
@@ -93,9 +99,9 @@ const ArticleEditor = () => {
       .filter(Boolean);
 
     const articleData = {
-      title: form.title,
-      slug: form.slug,
-      excerpt: form.excerpt || null,
+      title: form.title.trim(),
+      slug,
+      excerpt: form.excerpt.trim() || null,
       content: form.content || null,
       category_id: form.category_id || null,
       status,
