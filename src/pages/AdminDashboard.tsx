@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   BookOpen, Plus, Edit, Trash2, Eye, Bot, LogOut, FileText,
   LayoutDashboard, Loader2, CheckCircle, Clock, AlertCircle,
-  ChevronDown, Search
+  ChevronDown, Search, Rocket
 } from "lucide-react";
 import type { Tables } from "@/integrations/supabase/types";
 import AIAgentPanel from "@/components/AIAgentPanel";
@@ -78,6 +78,30 @@ const AdminDashboard = () => {
       toast({ title: "Error", description: "Failed to update status.", variant: "destructive" });
     } else {
       toast({ title: "Updated", description: `Article ${newStatus === "published" ? "published" : "unpublished"}.` });
+      refetch();
+    }
+  };
+
+  const unpublishedCount = articles.filter((a) => a.status !== "published").length;
+
+  const handlePublishAll = async () => {
+    const toPublish = articles.filter((a) => a.status !== "published");
+    if (toPublish.length === 0) {
+      toast({ title: "Nothing to publish", description: "All articles are already live." });
+      return;
+    }
+    if (!confirm(`Are you sure you want to publish all ${toPublish.length} unpublished article(s)? This will make them live on the website.`)) return;
+
+    const ids = toPublish.map((a) => a.id);
+    const { error } = await supabase
+      .from("articles")
+      .update({ status: "published", published_at: new Date().toISOString() })
+      .in("id", ids);
+
+    if (error) {
+      toast({ title: "Error", description: "Failed to publish articles.", variant: "destructive" });
+    } else {
+      toast({ title: "All Published! 🚀", description: `${toPublish.length} article(s) are now live.` });
       refetch();
     }
   };
@@ -190,6 +214,15 @@ const AdminDashboard = () => {
                 </select>
                 <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
               </div>
+              {unpublishedCount > 0 && (
+                <button
+                  onClick={handlePublishAll}
+                  className="flex items-center gap-2 px-4 py-2 bg-cat-howto text-white rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+                >
+                  <Rocket className="h-4 w-4" />
+                  Publish All ({unpublishedCount})
+                </button>
+              )}
               <button
                 onClick={() => navigate("/admin/editor")}
                 className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
