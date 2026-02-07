@@ -19,36 +19,57 @@ const Index = () => {
       <SEOHead />
       {/* Hero Section */}
       <section className="hero-gradient relative overflow-hidden">
-        <div className="absolute inset-0 opacity-10">
-          <div className="absolute top-20 left-10 w-72 h-72 bg-primary-foreground rounded-full blur-3xl" />
-          <div className="absolute bottom-10 right-20 w-96 h-96 bg-primary-foreground rounded-full blur-3xl" />
+        <div className="absolute inset-0 opacity-[0.07]">
+          <div className="absolute top-10 left-[10%] w-80 h-80 bg-primary-foreground rounded-full blur-[100px]" />
+          <div className="absolute bottom-0 right-[15%] w-[28rem] h-[28rem] bg-primary-foreground rounded-full blur-[120px]" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[40rem] h-[40rem] bg-accent rounded-full blur-[160px] opacity-30" />
         </div>
-        <div className="container relative py-16 md:py-24">
+        <div className="container relative py-20 md:py-28">
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
+            transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
             className="text-center max-w-3xl mx-auto"
           >
-            <h1 className="text-3xl md:text-5xl font-extrabold text-primary-foreground mb-4 leading-tight">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5, delay: 0.1 }}
+              className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary-foreground/10 backdrop-blur-sm border border-primary-foreground/10 mb-6"
+            >
+              <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+              <span className="text-xs font-medium text-primary-foreground/80">AI-powered guides updated daily</span>
+            </motion.div>
+            <h1 className="text-4xl md:text-6xl font-extrabold text-primary-foreground mb-5 leading-[1.1] tracking-tight">
               Digital Help for{" "}
-              <span className="text-accent">Everyone</span>
+              <span className="text-accent relative">
+                Everyone
+                <svg className="absolute -bottom-1 left-0 w-full h-2 text-accent/40" viewBox="0 0 200 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M1 5.5C47 2 153 2 199 5.5" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+                </svg>
+              </span>
             </h1>
-            <p className="text-base md:text-lg text-primary-foreground/80 mb-8 leading-relaxed max-w-2xl mx-auto">
+            <p className="text-base md:text-xl text-primary-foreground/75 mb-10 leading-relaxed max-w-2xl mx-auto">
               Clear, step-by-step guides for your phone, computer, apps, social media, and everything digital. 
               No tech jargon — just solutions that work.
             </p>
             <SearchBar variant="hero" />
-            <div className="flex flex-wrap items-center justify-center gap-2 mt-6">
-              <span className="text-xs text-primary-foreground/50">Popular:</span>
-              {["Reset password", "Clear cache", "Screenshot", "WiFi fix"].map((term) => (
-                <Link
+            <div className="flex flex-wrap items-center justify-center gap-2 mt-8">
+              <span className="text-xs text-primary-foreground/40 font-medium">Popular:</span>
+              {["Reset password", "Clear cache", "Screenshot", "WiFi fix"].map((term, i) => (
+                <motion.div
                   key={term}
-                  to={`/search?q=${encodeURIComponent(term)}`}
-                  className="text-xs px-3 py-1 rounded-full bg-primary-foreground/10 text-primary-foreground/70 hover:bg-primary-foreground/20 transition-colors"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.4, delay: 0.5 + i * 0.08 }}
                 >
-                  {term}
-                </Link>
+                  <Link
+                    to={`/search?q=${encodeURIComponent(term)}`}
+                    className="text-xs px-3.5 py-1.5 rounded-full bg-primary-foreground/10 text-primary-foreground/70 hover:bg-primary-foreground/20 hover:text-primary-foreground transition-all duration-200 backdrop-blur-sm border border-primary-foreground/5"
+                  >
+                    {term}
+                  </Link>
+                </motion.div>
               ))}
             </div>
           </motion.div>
@@ -105,18 +126,23 @@ const Index = () => {
 
       {/* Featured Guides */}
       {!featuredLoading && featured.length > 0 && (
-        <section className="bg-muted/50">
-          <div className="container py-12 md:py-16">
+        <section className="bg-muted/40 border-y border-border/50">
+          <div className="container py-14 md:py-20">
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
               transition={{ duration: 0.5 }}
             >
-              <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Featured Guides</h2>
-              <p className="text-muted-foreground mb-8">Most popular solutions our readers love</p>
+              <div className="flex items-end justify-between mb-8">
+                <div>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-primary mb-2 block">Handpicked</span>
+                  <h2 className="text-2xl md:text-3xl font-bold text-foreground">Featured Guides</h2>
+                  <p className="text-muted-foreground mt-1">Most popular solutions our readers love</p>
+                </div>
+              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 {featured.map((article, index) => (
                   <motion.div
                     key={article.id}
@@ -141,17 +167,18 @@ const Index = () => {
 
       {/* Latest Articles */}
       {!latestLoading && latest.length > 0 && (
-        <section className="container py-12 md:py-16">
+        <section className="container py-14 md:py-20">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.5 }}
           >
-            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Latest Articles</h2>
+            <span className="text-xs font-semibold uppercase tracking-wider text-primary mb-2 block">Recently added</span>
+            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-1">Latest Articles</h2>
             <p className="text-muted-foreground mb-8">Fresh guides added to help you daily</p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
               {latest.slice(0, 6).map((article, index) => (
                 <motion.div
                   key={article.id}
@@ -169,15 +196,25 @@ const Index = () => {
       )}
 
       {/* CTA Section */}
-      <section className="hero-gradient">
-        <div className="container py-12 md:py-16 text-center">
-          <h2 className="text-2xl md:text-3xl font-bold text-primary-foreground mb-3">
-            Can't find what you need?
-          </h2>
-          <p className="text-primary-foreground/80 mb-6 max-w-lg mx-auto">
-            Our knowledge base is growing every day with new guides powered by AI research. Try searching for your specific issue.
-          </p>
-          <SearchBar variant="hero" />
+      <section className="hero-gradient relative overflow-hidden">
+        <div className="absolute inset-0 opacity-[0.05]">
+          <div className="absolute top-0 right-[20%] w-64 h-64 bg-primary-foreground rounded-full blur-[80px]" />
+        </div>
+        <div className="container relative py-16 md:py-20 text-center">
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+          >
+            <h2 className="text-2xl md:text-4xl font-bold text-primary-foreground mb-4">
+              Can't find what you need?
+            </h2>
+            <p className="text-primary-foreground/75 mb-8 max-w-lg mx-auto text-base md:text-lg">
+              Our knowledge base is growing every day with new guides powered by AI research. Try searching for your specific issue.
+            </p>
+            <SearchBar variant="hero" />
+          </motion.div>
         </div>
       </section>
     </Layout>

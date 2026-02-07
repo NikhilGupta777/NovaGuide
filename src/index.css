@@ -36,10 +36,12 @@
 
     --radius: 0.75rem;
 
-    --hero-gradient: linear-gradient(135deg, hsl(195, 80%, 36%) 0%, hsl(210, 70%, 28%) 50%, hsl(225, 60%, 22%) 100%);
+    --hero-gradient: linear-gradient(145deg, hsl(195, 85%, 38%) 0%, hsl(210, 75%, 30%) 40%, hsl(225, 65%, 22%) 100%);
     --card-shadow: 0 1px 3px 0 hsl(215 25% 15% / 0.06), 0 1px 2px -1px hsl(215 25% 15% / 0.06);
-    --card-shadow-hover: 0 10px 25px -5px hsl(215 25% 15% / 0.08), 0 8px 10px -6px hsl(215 25% 15% / 0.04);
+    --card-shadow-hover: 0 14px 28px -6px hsl(215 25% 15% / 0.1), 0 8px 12px -6px hsl(215 25% 15% / 0.05);
     --hero-shadow: 0 20px 60px -15px hsl(195 80% 36% / 0.3);
+    --hero-pattern: radial-gradient(circle at 20% 80%, hsl(195 80% 50% / 0.15) 0%, transparent 50%),
+                    radial-gradient(circle at 80% 20%, hsl(32 95% 52% / 0.1) 0%, transparent 50%);
 
     --category-phone: 195 80% 36%;
     --category-tablet: 250 60% 50%;
@@ -90,7 +92,9 @@
     --input: 220 15% 20%;
     --ring: 195 75% 45%;
 
-    --hero-gradient: linear-gradient(135deg, hsl(195, 70%, 25%) 0%, hsl(210, 60%, 18%) 50%, hsl(225, 50%, 14%) 100%);
+    --hero-gradient: linear-gradient(145deg, hsl(195, 70%, 25%) 0%, hsl(210, 60%, 18%) 40%, hsl(225, 50%, 14%) 100%);
+    --hero-pattern: radial-gradient(circle at 20% 80%, hsl(195 70% 45% / 0.12) 0%, transparent 50%),
+                    radial-gradient(circle at 80% 20%, hsl(32 90% 55% / 0.08) 0%, transparent 50%);
 
     --sidebar-background: 240 5.9% 10%;
     --sidebar-foreground: 240 4.8% 95.9%;
@@ -121,16 +125,26 @@
 @layer components {
   .hero-gradient {
     background: var(--hero-gradient);
+    position: relative;
+  }
+
+  .hero-gradient::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--hero-pattern);
+    pointer-events: none;
   }
 
   .card-elevated {
     box-shadow: var(--card-shadow);
-    transition: box-shadow 0.3s ease, transform 0.3s ease;
+    transition: box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1), transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.35s ease;
   }
 
   .card-elevated:hover {
     box-shadow: var(--card-shadow-hover);
-    transform: translateY(-2px);
+    transform: translateY(-3px);
+    border-color: hsl(var(--primary) / 0.2);
   }
 
   .ad-placeholder {
