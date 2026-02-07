@@ -17,6 +17,7 @@ const AskAISection = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [hasInteracted, setHasInteracted] = useState(false);
+  const [errorCount, setErrorCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -30,6 +31,16 @@ const AskAISection = () => {
     e.preventDefault();
     const question = input.trim();
     if (!question || isLoading) return;
+
+    // Rate limiting: max 3 consecutive errors before cooldown
+    if (errorCount >= 3) {
+      setMessages((prev) => [...prev, {
+        id: Date.now().toString(),
+        role: "assistant",
+        content: "I'm having trouble right now. Please wait a moment before trying again.",
+      }]);
+      return;
+    }
 
     setHasInteracted(true);
     setInput("");
@@ -57,8 +68,10 @@ const AskAISection = () => {
         articleGenerationTriggered: data.articleGenerationTriggered,
       };
       setMessages((prev) => [...prev, assistantMsg]);
+      setErrorCount(0); // Reset on success
     } catch (err) {
       console.error("Ask AI error:", err);
+      setErrorCount((prev) => prev + 1);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",

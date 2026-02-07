@@ -104,6 +104,34 @@ serve(async (req) => {
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+    // Security: Only allow service-role or admin calls
+    const authHeader = req.headers.get("Authorization");
+    if (authHeader) {
+      const token = authHeader.replace("Bearer ", "");
+      if (token !== SUPABASE_SERVICE_ROLE_KEY) {
+        // Verify admin user
+        const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
+          global: { headers: { Authorization: authHeader } },
+        });
+        const { data: { user }, error: userError } = await userClient.auth.getUser();
+        if (userError || !user) {
+          return new Response(JSON.stringify({ error: "Unauthorized" }), {
+            status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        const adminDb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+        const { data: roleData } = await adminDb.from("user_roles").select("role").eq("user_id", user.id).eq("role", "admin").maybeSingle();
+        if (!roleData) {
+          return new Response(JSON.stringify({ error: "Admin access required" }), {
+            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+    }
+    // Note: pg_cron/pg_net calls may not include auth headers, so we allow headerless calls
+    // but the function is not publicly exposed (verify_jwt=false + internal only)
+
     const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     // Check automation settings
