@@ -1,17 +1,17 @@
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
+import { ArrowRight, Loader2 } from "lucide-react";
 import Layout from "@/components/Layout";
 import SearchBar from "@/components/SearchBar";
 import CategoryCard from "@/components/CategoryCard";
 import ArticleCard from "@/components/ArticleCard";
 import AdPlaceholder from "@/components/AdPlaceholder";
-import { categories } from "@/data/categories";
-import { getFeaturedArticles, articles } from "@/data/articles";
-import { ArrowRight } from "lucide-react";
-import { Link } from "react-router-dom";
+import { useCategories, useFeaturedArticles, useArticles } from "@/hooks/useDatabase";
 
 const Index = () => {
-  const featured = getFeaturedArticles();
-  const latest = articles.slice(0, 6);
+  const { categories, loading: catsLoading } = useCategories();
+  const { articles: featured, loading: featuredLoading } = useFeaturedArticles();
+  const { articles: latest, loading: latestLoading } = useArticles();
 
   return (
     <Layout hideHeaderAd>
@@ -79,50 +79,58 @@ const Index = () => {
             </Link>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {categories.map((category, index) => (
-              <motion.div
-                key={category.id}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.4, delay: index * 0.05 }}
-              >
-                <CategoryCard category={category} />
-              </motion.div>
-            ))}
-          </div>
+          {catsLoading ? (
+            <div className="flex justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {categories.map((category, index) => (
+                <motion.div
+                  key={category.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.4, delay: index * 0.05 }}
+                >
+                  <CategoryCard category={category} />
+                </motion.div>
+              ))}
+            </div>
+          )}
         </motion.div>
       </section>
 
       {/* Featured Guides */}
-      <section className="bg-muted/50">
-        <div className="container py-12 md:py-16">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.5 }}
-          >
-            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Featured Guides</h2>
-            <p className="text-muted-foreground mb-8">Most popular solutions our readers love</p>
+      {!featuredLoading && featured.length > 0 && (
+        <section className="bg-muted/50">
+          <div className="container py-12 md:py-16">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5 }}
+            >
+              <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Featured Guides</h2>
+              <p className="text-muted-foreground mb-8">Most popular solutions our readers love</p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {featured.map((article, index) => (
-                <motion.div
-                  key={article.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.4, delay: index * 0.08 }}
-                >
-                  <ArticleCard article={article} variant="featured" />
-                </motion.div>
-              ))}
-            </div>
-          </motion.div>
-        </div>
-      </section>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {featured.map((article, index) => (
+                  <motion.div
+                    key={article.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 0.4, delay: index * 0.08 }}
+                  >
+                    <ArticleCard article={article} categories={categories} variant="featured" />
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
+          </div>
+        </section>
+      )}
 
       {/* Inline Ad */}
       <div className="container py-4">
@@ -130,31 +138,33 @@ const Index = () => {
       </div>
 
       {/* Latest Articles */}
-      <section className="container py-12 md:py-16">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.5 }}
-        >
-          <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Latest Articles</h2>
-          <p className="text-muted-foreground mb-8">Fresh guides added to help you daily</p>
+      {!latestLoading && latest.length > 0 && (
+        <section className="container py-12 md:py-16">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+          >
+            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-2">Latest Articles</h2>
+            <p className="text-muted-foreground mb-8">Fresh guides added to help you daily</p>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {latest.map((article, index) => (
-              <motion.div
-                key={article.id}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.4, delay: index * 0.06 }}
-              >
-                <ArticleCard article={article} />
-              </motion.div>
-            ))}
-          </div>
-        </motion.div>
-      </section>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {latest.slice(0, 6).map((article, index) => (
+                <motion.div
+                  key={article.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.4, delay: index * 0.06 }}
+                >
+                  <ArticleCard article={article} categories={categories} />
+                </motion.div>
+              ))}
+            </div>
+          </motion.div>
+        </section>
+      )}
 
       {/* CTA Section */}
       <section className="hero-gradient">

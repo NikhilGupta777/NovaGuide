@@ -1,15 +1,20 @@
 import { Link } from "react-router-dom";
 import { Clock, ArrowRight } from "lucide-react";
-import type { Article } from "@/data/articles";
-import { categories } from "@/data/categories";
+import { getIconComponent, getCategoryColors } from "@/lib/iconMap";
+import type { Tables } from "@/integrations/supabase/types";
+
+type DbArticle = Tables<"articles">;
+type DbCategory = Tables<"categories">;
 
 interface ArticleCardProps {
-  article: Article;
+  article: DbArticle;
+  categories?: DbCategory[];
   variant?: "default" | "featured" | "compact";
 }
 
-const ArticleCard = ({ article, variant = "default" }: ArticleCardProps) => {
-  const category = categories.find((c) => c.id === article.categoryId);
+const ArticleCard = ({ article, categories = [], variant = "default" }: ArticleCardProps) => {
+  const category = categories.find((c) => c.id === article.category_id);
+  const colors = category ? getCategoryColors(category.icon) : null;
 
   if (variant === "featured") {
     return (
@@ -18,14 +23,14 @@ const ArticleCard = ({ article, variant = "default" }: ArticleCardProps) => {
         className="group block p-6 rounded-xl bg-card border border-border card-elevated"
       >
         <div className="flex items-center gap-2 mb-3">
-          {category && (
-            <span className={`category-badge ${category.bgClass} ${category.colorClass}`}>
+          {category && colors && (
+            <span className={`category-badge ${colors.bg} ${colors.color}`}>
               {category.name}
             </span>
           )}
           <span className="flex items-center gap-1 text-xs text-muted-foreground">
             <Clock className="h-3 w-3" />
-            {article.readTime} min read
+            {article.read_time} min read
           </span>
         </div>
         <h3 className="text-lg font-semibold text-card-foreground mb-2 group-hover:text-primary transition-colors leading-snug">
@@ -56,7 +61,7 @@ const ArticleCard = ({ article, variant = "default" }: ArticleCardProps) => {
               <span className="text-xs text-muted-foreground">{category.name}</span>
             )}
             <span className="text-xs text-muted-foreground">·</span>
-            <span className="text-xs text-muted-foreground">{article.readTime} min</span>
+            <span className="text-xs text-muted-foreground">{article.read_time} min</span>
           </div>
         </div>
         <ArrowRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors mt-1 flex-shrink-0" />
@@ -70,8 +75,8 @@ const ArticleCard = ({ article, variant = "default" }: ArticleCardProps) => {
       className="group block p-5 rounded-xl bg-card border border-border card-elevated"
     >
       <div className="flex items-center gap-2 mb-2">
-        {category && (
-          <span className={`category-badge ${category.bgClass} ${category.colorClass}`}>
+        {category && colors && (
+          <span className={`category-badge ${colors.bg} ${colors.color}`}>
             {category.name}
           </span>
         )}
@@ -85,7 +90,7 @@ const ArticleCard = ({ article, variant = "default" }: ArticleCardProps) => {
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1 text-xs text-muted-foreground">
           <Clock className="h-3 w-3" />
-          {article.readTime} min read
+          {article.read_time} min read
         </span>
         <span className="inline-flex items-center gap-1 text-xs font-medium text-primary opacity-0 group-hover:opacity-100 transition-opacity">
           Read <ArrowRight className="h-3 w-3" />
