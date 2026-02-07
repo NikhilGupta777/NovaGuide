@@ -57,6 +57,7 @@ export type Database = {
           current_step: number
           discovered_topics: Json | null
           error_message: string | null
+          factual_score: number | null
           generated_outline: string | null
           id: string
           mode: string
@@ -76,6 +77,7 @@ export type Database = {
           current_step?: number
           discovered_topics?: Json | null
           error_message?: string | null
+          factual_score?: number | null
           generated_outline?: string | null
           id?: string
           mode?: string
@@ -95,6 +97,7 @@ export type Database = {
           current_step?: number
           discovered_topics?: Json | null
           error_message?: string | null
+          factual_score?: number | null
           generated_outline?: string | null
           id?: string
           mode?: string
@@ -134,6 +137,7 @@ export type Database = {
           seo_description: string | null
           seo_title: string | null
           slug: string
+          sources: Json | null
           status: string
           tags: string[] | null
           title: string
@@ -155,6 +159,7 @@ export type Database = {
           seo_description?: string | null
           seo_title?: string | null
           slug: string
+          sources?: Json | null
           status?: string
           tags?: string[] | null
           title: string
@@ -176,6 +181,7 @@ export type Database = {
           seo_description?: string | null
           seo_title?: string | null
           slug?: string
+          sources?: Json | null
           status?: string
           tags?: string[] | null
           title?: string

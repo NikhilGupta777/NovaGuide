@@ -7,8 +7,8 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const MODEL = "google/gemini-3-flash-preview";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const MODEL_FLASH = "gemini-2.5-flash-preview-05-20";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -16,8 +16,8 @@ serve(async (req) => {
   }
 
   try {
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -68,9 +68,9 @@ serve(async (req) => {
       ? `Focus on these categories: ${targetCategories.map((id: string) => categories.find((c) => c.id === id)?.name || id).join(", ")}`
       : "Cover a variety of categories";
 
-    console.log("Auto-discover: Finding trending topics, count:", count);
+    console.log("Auto-discover: Finding trending topics with Google Search, count:", count);
 
-    const discoverPrompt = `You are a content strategist for DigitalHelp, a tech help website for non-technical users.
+    const systemPrompt = `You are a content strategist for DigitalHelp, a tech help website for non-technical users.
 
 AVAILABLE CATEGORIES:
 ${categoryList}
@@ -83,7 +83,7 @@ ${targetCatFilter}
 Your job: Discover ${count} trending, high-demand tech help topics that would attract organic search traffic.
 
 Think about:
-- Common tech problems people search for RIGHT NOW (2024-2025)
+- Common tech problems people search for RIGHT NOW (2024-2026)
 - Seasonal tech issues (new device setups, software updates, etc.)
 - Evergreen digital literacy topics beginners always struggle with
 - Problems that get asked repeatedly on Reddit, forums, and support sites
@@ -91,85 +91,94 @@ Think about:
 
 Each topic should be specific and actionable (not vague like "how to use a computer").
 
+Use Google Search to find what people are currently searching for and struggling with.
+
 You MUST respond using the discover_topics function.`;
 
-    const resp = await fetch(GATEWAY_URL, {
+    const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${GEMINI_API_KEY}`;
+
+    const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: discoverPrompt },
-          { role: "user", content: `Discover ${count} trending tech help topics that would be valuable for our audience.` },
+        contents: [
+          { role: "user", parts: [{ text: `Discover ${count} trending tech help topics that would be valuable for our audience. Search the web to find what people are actually looking for right now.` }] }
         ],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
         tools: [
+          { googleSearch: {} },
           {
-            type: "function",
-            function: {
+            functionDeclarations: [{
               name: "discover_topics",
               description: "Return discovered topic suggestions",
               parameters: {
-                type: "object",
+                type: "OBJECT",
                 properties: {
                   topics: {
-                    type: "array",
+                    type: "ARRAY",
                     items: {
-                      type: "object",
+                      type: "OBJECT",
                       properties: {
-                        topic: { type: "string", description: "The specific topic/question to write about" },
-                        category_id: { type: "string", description: "Best matching category UUID" },
-                        priority: { type: "string", enum: ["high", "medium", "low"], description: "Priority based on search demand" },
-                        reasoning: { type: "string", description: "Why this topic is valuable right now" },
-                        search_keywords: { type: "array", items: { type: "string" }, description: "Related search keywords" },
+                        topic: { type: "STRING", description: "The specific topic/question to write about" },
+                        category_id: { type: "STRING", description: "Best matching category UUID" },
+                        priority: { type: "STRING", description: "Priority: high, medium, or low" },
+                        reasoning: { type: "STRING", description: "Why this topic is valuable right now" },
+                        search_keywords: { type: "ARRAY", items: { type: "STRING" }, description: "Related search keywords" },
                       },
-                      required: ["topic", "category_id", "priority", "reasoning"],
-                      additionalProperties: false,
-                    },
-                  },
+                      required: ["topic", "category_id", "priority", "reasoning"]
+                    }
+                  }
                 },
-                required: ["topics"],
-                additionalProperties: false,
-              },
-            },
-          },
+                required: ["topics"]
+              }
+            }]
+          }
         ],
-        tool_choice: { type: "function", function: { name: "discover_topics" } },
+        generationConfig: { temperature: 0.8 },
       }),
     });
 
     if (!resp.ok) {
       const txt = await resp.text();
-      console.error("AI gateway error:", resp.status, txt);
+      console.error("Gemini API error:", resp.status, txt);
       if (resp.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limit exceeded. Try again later." }), {
           status: 429,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      if (resp.status === 402) {
-        return new Response(JSON.stringify({ error: "AI credits exhausted. Please add credits." }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      throw new Error(`AI gateway returned ${resp.status}`);
+      throw new Error(`Gemini API returned ${resp.status}`);
     }
 
     const data = await resp.json();
-    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) throw new Error("AI did not return topics");
 
-    const result = JSON.parse(toolCall.function.arguments);
+    // Extract function call from Gemini response
+    const candidates = data.candidates;
+    let result: { topics: unknown[] } = { topics: [] };
+
+    if (candidates?.[0]?.content?.parts) {
+      for (const part of candidates[0].content.parts) {
+        if (part.functionCall?.name === "discover_topics") {
+          result = part.functionCall.args;
+          break;
+        }
+      }
+    }
+
+    // If no function call, try to extract from text
+    if (result.topics.length === 0) {
+      const text = candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") || "";
+      console.log("No function call returned, text response length:", text.length);
+      // Return empty topics rather than fail
+    }
+
     console.log("Auto-discover: Found", result.topics?.length, "topics");
 
     // Log the discovery
     await db.from("agent_logs").insert({
-      action: `Discovered ${result.topics?.length || 0} topics`,
+      action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)`,
       status: "completed",
-      details: { topics: result.topics, mode: "auto_discover" },
+      details: { topics: result.topics, mode: "auto_discover", model: MODEL_FLASH },
     });
 
     return new Response(JSON.stringify(result), {

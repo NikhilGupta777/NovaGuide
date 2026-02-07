@@ -86,6 +86,7 @@ const AdminDashboard = () => {
     total: articles.length,
     published: articles.filter((a) => a.status === "published").length,
     drafts: articles.filter((a) => a.status === "draft").length,
+    needsReview: articles.filter((a) => a.status === "needs_review").length,
     aiGenerated: articles.filter((a) => a.ai_generated).length,
   };
 
@@ -185,6 +186,7 @@ const AdminDashboard = () => {
                   <option value="all">All Status</option>
                   <option value="published">Published</option>
                   <option value="draft">Drafts</option>
+                  <option value="needs_review">Needs Review</option>
                 </select>
                 <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
               </div>
@@ -235,9 +237,11 @@ const AdminDashboard = () => {
                               <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
                                 article.status === "published"
                                   ? "bg-cat-howto/10 text-cat-howto"
+                                  : article.status === "needs_review"
+                                  ? "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-400"
                                   : "bg-cat-account/10 text-cat-account"
                               }`}>
-                                {article.status}
+                                {article.status === "needs_review" ? "needs review" : article.status}
                               </span>
                             </td>
                             <td className="py-3 px-4 hidden sm:table-cell">
