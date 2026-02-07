@@ -166,39 +166,47 @@ serve(async (req) => {
 
     await delay(2000);
 
-    // Step 1b: Parse into structured topics (function_declarations ONLY, no google_search)
-    console.log("Step 1b: Parsing topics into structured data...");
-    const parseResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
-      { role: "user", parts: [{ text: `Based on this research, extract exactly ${articlesPerRun} topic suggestions using the discover_topics function:\n\n${searchResults}` }] }
-    ], [
-      {
-        function_declarations: [{
-          name: "discover_topics",
-          description: "Return topic suggestions",
-          parameters: {
-            type: "OBJECT",
-            properties: {
-              topics: {
-                type: "ARRAY",
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    topic: { type: "STRING" },
-                    category_id: { type: "STRING" },
-                    priority: { type: "STRING" },
-                  },
-                  required: ["topic", "category_id", "priority"]
-                }
-              }
-            },
-            required: ["topics"]
-          }
-        }]
-      }
-    ], `CATEGORIES:\n${categoryList}\n\nExtract structured topics from the research.`);
+    // Step 1b: Parse into structured topics using JSON output mode (reliable)
+    console.log("Step 1b: Parsing topics into structured JSON...");
+    const parsePrompt = `Based on this web research, extract exactly ${articlesPerRun} specific tech help topic suggestions.
 
-    const discoverArgs = extractFunctionCall(parseResp);
-    const topics = (discoverArgs?.topics as { topic: string; category_id: string; priority: string }[]) || [];
+CATEGORIES:
+${categoryList}
+
+WEB RESEARCH:
+${searchResults}
+
+Return a JSON object with a "topics" array. Each topic must have:
+- "topic": specific question/problem to write about
+- "category_id": best matching category UUID from above
+- "priority": "high", "medium", or "low"
+
+Return ONLY valid JSON, no markdown.`;
+
+    const parseUrl = `${GEMINI_BASE}/models/${MODEL_RESEARCH}:generateContent?key=${GEMINI_API_KEY}`;
+    const parseResp = await fetch(parseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
+        generation_config: { temperature: 0.5, response_mime_type: "application/json" },
+      }),
+    });
+
+    if (!parseResp.ok) {
+      const errText = await parseResp.text();
+      throw new Error(`Topic parse failed: ${parseResp.status} - ${errText.slice(0, 200)}`);
+    }
+
+    const parseData = await parseResp.json();
+    const parseText = extractText(parseData);
+    let topics: { topic: string; category_id: string; priority: string }[] = [];
+    try {
+      const parsed = JSON.parse(parseText);
+      topics = parsed.topics || [];
+    } catch (e) {
+      console.error("Failed to parse topics JSON:", (e as Error).message);
+    }
 
     if (topics.length === 0) {
       console.log("Scheduled runner: No topics discovered");
