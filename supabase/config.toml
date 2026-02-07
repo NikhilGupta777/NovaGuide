@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.ai-scheduled-runner]
 verify_jwt = false
+
+[functions.ai-nightly-builder]
+verify_jwt = false

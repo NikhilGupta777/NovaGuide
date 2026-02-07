@@ -277,6 +277,156 @@ export type Database = {
           },
         ]
       }
+      nightly_builder_queue: {
+        Row: {
+          article_id: string | null
+          batch_number: number
+          category_id: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          priority: number
+          run_date: string
+          status: string
+          topic: string
+        }
+        Insert: {
+          article_id?: string | null
+          batch_number?: number
+          category_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          priority?: number
+          run_date?: string
+          status?: string
+          topic: string
+        }
+        Update: {
+          article_id?: string | null
+          batch_number?: number
+          category_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          priority?: number
+          run_date?: string
+          status?: string
+          topic?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "nightly_builder_queue_article_id_fkey"
+            columns: ["article_id"]
+            isOneToOne: false
+            referencedRelation: "articles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "nightly_builder_queue_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      nightly_builder_runs: {
+        Row: {
+          articles_failed: number
+          articles_generated: number
+          articles_published: number
+          batch_number: number
+          categories_created: number
+          completed_at: string | null
+          created_at: string
+          details: Json
+          error_message: string | null
+          id: string
+          started_at: string
+          status: string
+          total_after_dedup: number
+          total_categories_processed: number
+          total_topics_found: number
+        }
+        Insert: {
+          articles_failed?: number
+          articles_generated?: number
+          articles_published?: number
+          batch_number?: number
+          categories_created?: number
+          completed_at?: string | null
+          created_at?: string
+          details?: Json
+          error_message?: string | null
+          id?: string
+          started_at?: string
+          status?: string
+          total_after_dedup?: number
+          total_categories_processed?: number
+          total_topics_found?: number
+        }
+        Update: {
+          articles_failed?: number
+          articles_generated?: number
+          articles_published?: number
+          batch_number?: number
+          categories_created?: number
+          completed_at?: string | null
+          created_at?: string
+          details?: Json
+          error_message?: string | null
+          id?: string
+          started_at?: string
+          status?: string
+          total_after_dedup?: number
+          total_categories_processed?: number
+          total_topics_found?: number
+        }
+        Relationships: []
+      }
+      nightly_builder_settings: {
+        Row: {
+          allow_category_creation: boolean
+          auto_publish_min_factual: number
+          auto_publish_min_quality: number
+          created_at: string
+          enabled: boolean
+          id: string
+          last_run_at: string | null
+          next_run_at: string | null
+          stop_requested: boolean
+          topics_per_category: number
+          updated_at: string
+        }
+        Insert: {
+          allow_category_creation?: boolean
+          auto_publish_min_factual?: number
+          auto_publish_min_quality?: number
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          stop_requested?: boolean
+          topics_per_category?: number
+          updated_at?: string
+        }
+        Update: {
+          allow_category_creation?: boolean
+          auto_publish_min_factual?: number
+          auto_publish_min_quality?: number
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          last_run_at?: string | null
+          next_run_at?: string | null
+          stop_requested?: boolean
+          topics_per_category?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           created_at: string

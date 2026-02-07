@@ -6,8 +6,9 @@ import {
   Bot, Loader2, Sparkles, Search as SearchIcon, Play, Zap, CheckCircle2,
   FileText, Clock, AlertTriangle, Lightbulb, Rocket, RefreshCw, ArrowRight,
   TrendingUp, Target, ChevronRight, Eye, Star, Shield, Globe, Timer,
-  Power, StopCircle, Settings2, CalendarClock
+  Power, StopCircle, Settings2, CalendarClock, Moon
 } from "lucide-react";
+import NightlyBuilderTab from "@/components/NightlyBuilderTab";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -342,7 +343,7 @@ export default function AIAgentPanel() {
       </div>
 
       <Tabs defaultValue="generate" className="w-full">
-        <TabsList className="grid grid-cols-4 w-full">
+        <TabsList className="grid grid-cols-5 w-full">
           <TabsTrigger value="generate" className="flex items-center gap-1.5 text-xs sm:text-sm">
             <Sparkles className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Generate</span>
@@ -358,6 +359,10 @@ export default function AIAgentPanel() {
           <TabsTrigger value="automation" className="flex items-center gap-1.5 text-xs sm:text-sm">
             <CalendarClock className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Automation</span>
+          </TabsTrigger>
+          <TabsTrigger value="nightly" className="flex items-center gap-1.5 text-xs sm:text-sm">
+            <Moon className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Nightly</span>
           </TabsTrigger>
         </TabsList>
 
@@ -748,6 +753,11 @@ export default function AIAgentPanel() {
                   )}
                 </div>
               </div>
+            </TabsContent>
+
+            {/* Nightly Builder Tab */}
+            <TabsContent value="nightly" className="mt-0">
+              <NightlyBuilderTab />
             </TabsContent>
           </div>
 
