@@ -193,49 +193,46 @@ Apply only these minor fixes and return the corrected article as JSON.`;
   return null;
 }
 
-// ── Main Audit Orchestrator ──────────────────────────────────────
+// ── Chunked Audit: processes one batch per invocation ─────────────
+// The client calls this repeatedly until remaining === 0.
 
-async function runContentAudit(autoFix: boolean) {
+const SCAN_BATCH_SIZE = 3;
+
+async function runAuditChunk(autoFix: boolean, runId?: string) {
   const db = serviceClient();
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
-  // Create audit run
-  const { data: runData } = await db.from("content_audit_runs").insert({
-    status: "scanning",
-    started_at: new Date().toISOString(),
-  }).select().single();
+  // Load ALL articles
+  const { data: articles, error: artErr } = await db.from("articles")
+    .select("id, title, slug, content, excerpt, status, category_id")
+    .order("created_at", { ascending: false });
 
-  const runId = runData?.id;
-  if (!runId) throw new Error("Failed to create audit run");
-
-  try {
-    // Load ALL articles
-    const { data: articles, error } = await db.from("articles")
-      .select("id, title, slug, content, excerpt, status, category_id")
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    if (!articles || articles.length === 0) {
+  if (artErr) throw artErr;
+  if (!articles || articles.length === 0) {
+    if (runId) {
       await db.from("content_audit_runs").update({
         status: "completed",
         total_articles_scanned: 0,
         completed_at: new Date().toISOString(),
       }).eq("id", runId);
-      return;
     }
+    return { runId, remaining: 0, phase: "done" };
+  }
 
-    console.log(`Auditing ${articles.length} articles...`);
+  // Create run if first call
+  if (!runId) {
+    const { data: runData } = await db.from("content_audit_runs").insert({
+      status: "scanning",
+      started_at: new Date().toISOString(),
+    }).select().single();
+    runId = runData?.id;
+    if (!runId) throw new Error("Failed to create audit run");
 
-    let totalIssues = 0;
-    let autoFixesApplied = 0;
-    let duplicatesFound = 0;
-    let articlesSetToDraft = 0;
-
-    // Phase 1: Duplicate detection (local, fast)
+    // Phase 1: Duplicate detection (fast, do it all in first call)
     console.log("Phase 1: Detecting duplicates...");
     const duplicates = findDuplicates(articles);
-    duplicatesFound = duplicates.length;
+    let articlesSetToDraft = 0;
 
     for (const dup of duplicates) {
       await db.from("content_audit_findings").insert({
@@ -250,13 +247,11 @@ async function runContentAudit(autoFix: boolean) {
         related_article_title: dup.relatedTitle,
         status: "open",
       });
-      totalIssues++;
 
       const newerArticle = articles.find(a => a.id === dup.relatedId);
       if (newerArticle && newerArticle.status === "published") {
         await db.from("articles").update({ status: "draft" }).eq("id", dup.relatedId);
         articlesSetToDraft++;
-        console.log(`Set duplicate to draft: "${dup.relatedTitle}"`);
 
         await db.from("content_audit_findings").insert({
           run_id: runId,
@@ -270,123 +265,226 @@ async function runContentAudit(autoFix: boolean) {
           fix_applied: "Set status from published to draft",
           status: "resolved",
         });
-        totalIssues++;
       }
     }
 
-    // Update progress after phase 1
     await db.from("content_audit_runs").update({
-      duplicates_found: duplicatesFound,
+      duplicates_found: duplicates.length,
       articles_set_to_draft: articlesSetToDraft,
-      total_issues_found: totalIssues,
+      total_articles_scanned: 0,
     }).eq("id", runId);
 
-    // Phase 2: AI-powered content analysis (in batches of 3 for reliability)
-    console.log("Phase 2: AI content analysis...");
-    const BATCH_SIZE = 3;
-    for (let i = 0; i < articles.length; i += BATCH_SIZE) {
-      const batch = articles.slice(i, i + BATCH_SIZE);
-      console.log(`Analyzing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(articles.length / BATCH_SIZE)}...`);
+    return { runId, remaining: articles.length, phase: "scanning" };
+  }
 
-      try {
-        const results = await analyzeArticlesBatch(apiKey, batch);
+  // Subsequent calls: figure out which articles haven't been analyzed yet
+  // We track progress by checking which article IDs already have findings
+  const { data: existingFindings } = await db.from("content_audit_findings")
+    .select("article_id")
+    .eq("run_id", runId)
+    .not("issue_type", "eq", "duplicate")
+    .not("issue_type", "eq", "auto_action");
 
-        for (const result of results) {
-          for (const issue of result.issues) {
-            await db.from("content_audit_findings").insert({
-              run_id: runId,
-              article_id: result.articleId,
-              article_title: batch.find(a => a.id === result.articleId)?.title || "Unknown",
-              issue_type: issue.type,
-              severity: issue.severity,
-              description: issue.description,
-              suggestion: issue.suggestion,
-              status: "open",
-            });
-            totalIssues++;
-          }
+  const scannedIds = new Set((existingFindings || []).map(f => f.article_id).filter(Boolean));
+  const unscanned = articles.filter(a => !scannedIds.has(a.id));
 
-          // Phase 3: Auto-fix minor issues if enabled
-          if (autoFix) {
-            const fixableIssues = result.issues.filter(i => i.autoFixable);
-            if (fixableIssues.length > 0) {
-              const article = batch.find(a => a.id === result.articleId);
-              if (article) {
-                try {
-                  const fixed = await autoFixArticle(apiKey, article, fixableIssues);
-                  if (fixed && fixed.fixes && fixed.fixes.length > 0) {
-                    const updatePayload: Record<string, unknown> = {};
-                    if (fixed.title && fixed.title !== article.title) updatePayload.title = fixed.title;
-                    if (fixed.content && fixed.content !== article.content) updatePayload.content = fixed.content;
-                    if (fixed.excerpt && fixed.excerpt !== article.excerpt) updatePayload.excerpt = fixed.excerpt;
+  if (unscanned.length === 0) {
+    // All done — mark complete
+    const { count: totalIssues } = await db.from("content_audit_findings")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", runId);
+    const { count: autoFixes } = await db.from("content_audit_findings")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", runId)
+      .eq("auto_fixed", true);
 
-                    if (Object.keys(updatePayload).length > 0) {
-                      await db.from("articles").update(updatePayload).eq("id", article.id);
-                      autoFixesApplied++;
-
-                      await db.from("content_audit_findings").insert({
-                        run_id: runId,
-                        article_id: article.id,
-                        article_title: article.title,
-                        issue_type: "auto_fix",
-                        severity: "info",
-                        description: `Auto-fixed ${fixed.fixes.length} minor issues`,
-                        suggestion: fixed.fixes.join("; "),
-                        auto_fixed: true,
-                        fix_applied: fixed.fixes.join("; "),
-                        status: "resolved",
-                      });
-                      totalIssues++;
-                      console.log(`Auto-fixed ${fixed.fixes.length} issues in: "${article.title}"`);
-                    }
-                  }
-                } catch (err) {
-                  console.error(`Auto-fix failed for "${article.title}":`, err);
-                }
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error(`Batch analysis error:`, err);
-      }
-
-      // Update progress
-      await db.from("content_audit_runs").update({
-        total_articles_scanned: Math.min(i + BATCH_SIZE, articles.length),
-        total_issues_found: totalIssues,
-        auto_fixes_applied: autoFixesApplied,
-        duplicates_found: duplicatesFound,
-        articles_set_to_draft: articlesSetToDraft,
-      }).eq("id", runId);
-
-      // Rate limit between batches
-      if (i + BATCH_SIZE < articles.length) {
-        await delay(2000);
-      }
-    }
-
-    // Complete
     await db.from("content_audit_runs").update({
       status: "completed",
       total_articles_scanned: articles.length,
-      total_issues_found: totalIssues,
-      auto_fixes_applied: autoFixesApplied,
-      duplicates_found: duplicatesFound,
-      articles_set_to_draft: articlesSetToDraft,
+      total_issues_found: totalIssues ?? 0,
+      auto_fixes_applied: autoFixes ?? 0,
       completed_at: new Date().toISOString(),
     }).eq("id", runId);
 
-    console.log(`Audit complete: ${articles.length} scanned, ${totalIssues} issues, ${autoFixesApplied} auto-fixes`);
+    console.log(`Audit complete: ${articles.length} scanned`);
+    return { runId, remaining: 0, phase: "done" };
+  }
+
+  // Process next batch
+  const batch = unscanned.slice(0, SCAN_BATCH_SIZE);
+  console.log(`Scanning batch: ${scannedIds.size + 1}-${scannedIds.size + batch.length} of ${articles.length} (${unscanned.length} remaining)`);
+
+  try {
+    const results = await analyzeArticlesBatch(apiKey, batch);
+    let batchIssues = 0;
+    let batchAutoFixes = 0;
+
+    for (const result of results) {
+      if (!result.issues || result.issues.length === 0) {
+        // Insert a marker so we know this article was scanned
+        await db.from("content_audit_findings").insert({
+          run_id: runId,
+          article_id: result.articleId,
+          article_title: batch.find(a => a.id === result.articleId)?.title || "Unknown",
+          issue_type: "scan_complete",
+          severity: "info",
+          description: "No issues found",
+          status: "resolved",
+        });
+        continue;
+      }
+
+      for (const issue of result.issues) {
+        await db.from("content_audit_findings").insert({
+          run_id: runId,
+          article_id: result.articleId,
+          article_title: batch.find(a => a.id === result.articleId)?.title || "Unknown",
+          issue_type: issue.type,
+          severity: issue.severity,
+          description: issue.description,
+          suggestion: issue.suggestion,
+          status: "open",
+        });
+        batchIssues++;
+      }
+
+      // Auto-fix minor issues if enabled
+      if (autoFix) {
+        const fixableIssues = result.issues.filter(i => i.autoFixable);
+        if (fixableIssues.length > 0) {
+          const article = batch.find(a => a.id === result.articleId);
+          if (article) {
+            try {
+              const fixed = await autoFixArticle(apiKey, article, fixableIssues);
+              if (fixed && fixed.fixes && fixed.fixes.length > 0) {
+                const updatePayload: Record<string, unknown> = {};
+                if (fixed.title && fixed.title !== article.title) updatePayload.title = fixed.title;
+                if (fixed.content && fixed.content !== article.content) updatePayload.content = fixed.content;
+                if (fixed.excerpt && fixed.excerpt !== article.excerpt) updatePayload.excerpt = fixed.excerpt;
+
+                if (Object.keys(updatePayload).length > 0) {
+                  await db.from("articles").update(updatePayload).eq("id", article.id);
+                  batchAutoFixes++;
+
+                  await db.from("content_audit_findings").insert({
+                    run_id: runId,
+                    article_id: article.id,
+                    article_title: article.title,
+                    issue_type: "auto_fix",
+                    severity: "info",
+                    description: `Auto-fixed ${fixed.fixes.length} minor issues`,
+                    suggestion: fixed.fixes.join("; "),
+                    auto_fixed: true,
+                    fix_applied: fixed.fixes.join("; "),
+                    status: "resolved",
+                  });
+                }
+              }
+            } catch (err) {
+              console.error(`Auto-fix failed for "${article.title}":`, err);
+            }
+          }
+        }
+      }
+    }
+
+    // Also handle articles that AI didn't return results for
+    for (const art of batch) {
+      const hasResult = results.some(r => r.articleId === art.id);
+      if (!hasResult) {
+        await db.from("content_audit_findings").insert({
+          run_id: runId,
+          article_id: art.id,
+          article_title: art.title,
+          issue_type: "scan_complete",
+          severity: "info",
+          description: "No issues found",
+          status: "resolved",
+        });
+      }
+    }
+
+    // Update progress
+    const newScanned = scannedIds.size + batch.length;
+    await db.from("content_audit_runs").update({
+      total_articles_scanned: newScanned,
+    }).eq("id", runId);
 
   } catch (err) {
-    console.error("Content audit error:", err);
+    console.error(`Batch analysis error:`, err);
+    // Still mark these articles as scanned to avoid infinite loop
+    for (const art of batch) {
+      if (!scannedIds.has(art.id)) {
+        await db.from("content_audit_findings").insert({
+          run_id: runId,
+          article_id: art.id,
+          article_title: art.title,
+          issue_type: "scan_error",
+          severity: "warning",
+          description: `Scan failed: ${err instanceof Error ? err.message : String(err)}`,
+          status: "open",
+        });
+      }
+    }
     await db.from("content_audit_runs").update({
-      status: "failed",
-      error_message: err instanceof Error ? err.message : String(err),
-      completed_at: new Date().toISOString(),
+      total_articles_scanned: scannedIds.size + batch.length,
     }).eq("id", runId);
   }
+
+  const newRemaining = unscanned.length - batch.length;
+  return { runId, remaining: newRemaining, phase: "scanning" };
+}
+
+// ── Chunked Fix All: processes a few findings per invocation ──────
+
+const FIX_BATCH_SIZE = 3;
+
+async function fixAllChunk(runId: string) {
+  const db = serviceClient();
+
+  // Get open fixable findings
+  const { data: openFindings } = await db.from("content_audit_findings")
+    .select("id, article_id, suggestion")
+    .eq("run_id", runId)
+    .eq("status", "open")
+    .not("article_id", "is", null)
+    .not("suggestion", "is", null)
+    .limit(FIX_BATCH_SIZE);
+
+  if (!openFindings || openFindings.length === 0) {
+    await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", runId);
+    return { remaining: 0, fixed: 0 };
+  }
+
+  // Mark as fixing
+  await db.from("content_audit_runs").update({ fix_all_status: "fixing" }).eq("id", runId);
+
+  let fixed = 0;
+  for (const finding of openFindings) {
+    try {
+      await applyFixToArticle(finding.id);
+      fixed++;
+      if (fixed < openFindings.length) await delay(2000);
+    } catch (err) {
+      console.error(`Failed to fix finding ${finding.id}:`, err);
+    }
+  }
+
+  // Check how many remain
+  const { count: remaining } = await db.from("content_audit_findings")
+    .select("*", { count: "exact", head: true })
+    .eq("run_id", runId)
+    .eq("status", "open")
+    .not("article_id", "is", null)
+    .not("suggestion", "is", null);
+
+  const rem = remaining ?? 0;
+  if (rem === 0) {
+    await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", runId);
+  }
+
+  console.log(`Fix chunk done: ${fixed} fixed this batch, ${rem} remaining`);
+  return { remaining: rem, fixed };
 }
 
 // ── Apply Fix to Single Article ──────────────────────────────────
@@ -396,7 +494,6 @@ async function applyFixToArticle(findingId: string) {
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
-  // Get finding
   const { data: finding } = await db.from("content_audit_findings")
     .select("*")
     .eq("id", findingId)
@@ -405,7 +502,6 @@ async function applyFixToArticle(findingId: string) {
   if (!finding) throw new Error("Finding not found");
   if (!finding.article_id) throw new Error("No article associated with this finding");
 
-  // Get article
   const { data: article } = await db.from("articles")
     .select("id, title, content, excerpt")
     .eq("id", finding.article_id)
@@ -413,7 +509,6 @@ async function applyFixToArticle(findingId: string) {
 
   if (!article) throw new Error("Article not found");
 
-  // Detect if this is a truncated/incomplete article issue
   const isTruncationIssue = finding.issue_type === "quality" && (
     finding.description.toLowerCase().includes("incomplete") ||
     finding.description.toLowerCase().includes("truncat") ||
@@ -428,7 +523,6 @@ async function applyFixToArticle(findingId: string) {
   let prompt: string;
 
   if (isTruncationIssue) {
-    // For truncated articles, regenerate the FULL content
     systemPrompt = `You are an expert tech writer. The article below is TRUNCATED/INCOMPLETE — its content was cut off during generation. You must COMPLETE it fully.
 
 CRITICAL INSTRUCTIONS:
@@ -495,17 +589,15 @@ Apply this fix and return the corrected article as JSON.`;
 
   if (actuallyChanged) {
     await db.from("articles").update(updatePayload).eq("id", article.id);
-    // Mark finding as resolved only if we made real changes
     await db.from("content_audit_findings").update({
       status: "resolved",
       auto_fixed: true,
       fix_applied: fixed.fixDescription || "Applied AI-suggested fix",
     }).eq("id", findingId);
   } else {
-    // No changes made — mark as "skipped" not "resolved"
     await db.from("content_audit_findings").update({
       fix_applied: "No changes could be applied — manual review needed",
-      status: "open", // Keep open so user knows it needs attention
+      status: "open",
     }).eq("id", findingId);
     console.log(`No actual changes for finding ${findingId} — keeping open`);
   }
@@ -547,89 +639,29 @@ serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
 
-    // Handle "apply fix" action
+    // Handle "apply fix" action — single finding
     if (body.action === "apply_fix" && body.findingId) {
       console.log(`Applying fix to finding: ${body.findingId}`);
       const result = await applyFixToArticle(body.findingId);
       return jsonResp({ success: true, ...result });
     }
 
-    // Handle "fix all" action - runs entirely server-side, updates DB for progress
+    // Handle "fix_all" action — chunked, processes FIX_BATCH_SIZE per call
     if (body.action === "fix_all" && body.runId) {
-      console.log(`Fixing all open findings for run: ${body.runId}`);
-      const db = serviceClient();
-
-      // Mark run as fixing
-      await db.from("content_audit_runs").update({ fix_all_status: "fixing" }).eq("id", body.runId);
-
-      const { data: openFindings } = await db.from("content_audit_findings")
-        .select("id, article_id, suggestion")
-        .eq("run_id", body.runId)
-        .eq("status", "open")
-        .not("article_id", "is", null)
-        .not("suggestion", "is", null);
-
-      if (!openFindings || openFindings.length === 0) {
-        await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", body.runId);
-        return jsonResp({ success: true, fixed: 0, message: "No fixable findings found" });
-      }
-
-      // Fire-and-forget: respond immediately, process in background
-      const backgroundWork = (async () => {
-        let fixed = 0;
-        let failed = 0;
-        for (const finding of openFindings) {
-          try {
-            await applyFixToArticle(finding.id);
-            fixed++;
-            console.log(`Fixed ${fixed}/${openFindings.length}`);
-            // Update auto_fixes_applied count on the run for progress tracking
-            await db.from("content_audit_runs").update({
-              auto_fixes_applied: fixed,
-            }).eq("id", body.runId);
-            if (fixed < openFindings.length) await delay(2000);
-          } catch (err) {
-            console.error(`Failed to fix finding ${finding.id}:`, err);
-            failed++;
-          }
-        }
-        await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", body.runId);
-        console.log(`Fix all complete: ${fixed} fixed, ${failed} failed out of ${openFindings.length}`);
-      })();
-
-      // Use waitUntil for true background execution (survives client disconnect)
-      // @ts-ignore - EdgeRuntime is available in Supabase Edge Functions
-      if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
-        EdgeRuntime.waitUntil(backgroundWork);
-        return jsonResp({ success: true, message: "Fix all started in background", total: openFindings.length });
-      }
-
-      // Fallback: await (still works but won't survive timeout)
-      await backgroundWork;
-      return jsonResp({ success: true, message: "Fix all completed server-side" });
+      console.log(`Fix all chunk for run: ${body.runId}`);
+      const result = await fixAllChunk(body.runId);
+      return jsonResp({ success: true, ...result });
     }
 
+    // Handle "scan" action — chunked, processes SCAN_BATCH_SIZE per call
+    // Pass runId to resume an existing scan
     const autoFix = body.autoFix !== false;
-    console.log(`Content audit triggered (autoFix: ${autoFix})`);
+    const existingRunId = body.runId || undefined;
+    console.log(`Audit chunk (autoFix: ${autoFix}, runId: ${existingRunId || "new"})`);
 
-    // Run in background so it survives client disconnect / container timeout
-    const work = (async () => {
-      try {
-        await runContentAudit(autoFix);
-      } catch (e) {
-        console.error("Content audit execution error:", e);
-      }
-    })();
+    const result = await runAuditChunk(autoFix, existingRunId);
+    return jsonResp({ success: true, ...result });
 
-    // @ts-ignore - EdgeRuntime.waitUntil available in Supabase Edge Functions
-    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
-      EdgeRuntime.waitUntil(work);
-      return jsonResp({ success: true, message: "Content audit started in background" });
-    }
-
-    // Fallback: await
-    await work;
-    return jsonResp({ success: true, message: "Content audit completed" });
   } catch (err) {
     console.error("Content audit handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);

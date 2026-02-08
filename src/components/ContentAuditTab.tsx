@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -55,6 +55,8 @@ const TYPE_LABELS: Record<string, string> = {
   formatting: "Formatting",
   auto_fix: "Auto-Fixed",
   auto_action: "Auto-Action",
+  scan_complete: "Clean",
+  scan_error: "Scan Error",
 };
 
 export default function ContentAuditTab() {
@@ -72,6 +74,8 @@ export default function ContentAuditTab() {
   const [fixingAll, setFixingAll] = useState(false);
   const [fixAllProgress, setFixAllProgress] = useState("");
   const [totalArticles, setTotalArticles] = useState(0);
+  const [scanProgress, setScanProgress] = useState("");
+  const abortRef = useRef(false);
 
   const fetchRuns = useCallback(async () => {
     const { data } = await supabase
@@ -93,6 +97,7 @@ export default function ContentAuditTab() {
       .from("content_audit_findings")
       .select("*")
       .eq("run_id", runId)
+      .not("issue_type", "eq", "scan_complete") // hide "clean" markers
       .order("severity", { ascending: true })
       .order("created_at", { ascending: false });
     if (data) setFindings(data as unknown as AuditFinding[]);
@@ -103,61 +108,36 @@ export default function ContentAuditTab() {
     if (count !== null) setTotalArticles(count);
   }, []);
 
-  // Fix all for a specific run — fires server-side edge function, polls DB for progress
+  // ── Chunked Fix All: call edge function in a loop ──────────────
   const triggerFixAllForRun = useCallback(async (runId: string) => {
     setFixingAll(true);
     setFixAllProgress("Starting fix all...");
+    abortRef.current = false;
 
     try {
-      // Fire the server-side fix_all action (don't await — it may take long)
-      supabase.functions.invoke("ai-content-audit", {
-        body: { action: "fix_all", runId },
-      }).then(() => {
-        console.log("Fix all server call completed");
-      }).catch((err) => {
-        console.error("Fix all server error:", err);
-      });
+      let totalFixed = 0;
+      while (!abortRef.current) {
+        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+          body: { action: "fix_all", runId },
+        });
 
-      // Poll DB for progress until fix_all_status changes to "fixed"
-      const pollForCompletion = async () => {
-        let attempts = 0;
-        const maxAttempts = 300; // 5 min max poll
-        while (attempts < maxAttempts) {
-          await new Promise(r => setTimeout(r, 3000));
-          attempts++;
-
-          const { data: run } = await (supabase.from("content_audit_runs") as any)
-            .select("fix_all_status, auto_fixes_applied")
-            .eq("id", runId)
-            .single();
-
-          if (!run) break;
-
-          // Count remaining open findings for progress
-          const { count } = await supabase
-            .from("content_audit_findings")
-            .select("*", { count: "exact", head: true })
-            .eq("run_id", runId)
-            .neq("status", "resolved")
-            .not("article_id", "is", null)
-            .not("suggestion", "is", null);
-
-          const remaining = count ?? 0;
-          const fixed = run.auto_fixes_applied ?? 0;
-          setFixAllProgress(`Fixed ${fixed}, ${remaining} remaining...`);
-
-          // Refresh findings list
-          fetchFindings(runId);
-
-          if (run.fix_all_status === "fixed" || run.fix_all_status === null) {
-            break;
-          }
+        if (error) {
+          console.error("Fix all chunk error:", error);
+          break;
         }
-      };
 
-      await pollForCompletion();
+        totalFixed += data?.fixed ?? 0;
+        const remaining = data?.remaining ?? 0;
+        setFixAllProgress(`Fixed ${totalFixed}, ${remaining} remaining...`);
+        fetchFindings(runId);
 
-      toast({ title: "Fix All Complete", description: "All fixable issues have been processed server-side." });
+        if (remaining === 0) break;
+
+        // Small delay between chunks
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      toast({ title: "Fix All Complete", description: `Processed all fixable issues.` });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Fix all failed";
       toast({ title: "Error", description: msg, variant: "destructive" });
@@ -165,39 +145,25 @@ export default function ContentAuditTab() {
       setFixingAll(false);
       setFixAllProgress("");
       fetchRuns();
-      if (selectedRunId) fetchFindings(selectedRunId);
+      fetchFindings(runId);
     }
-  }, [toast, fetchFindings, fetchRuns, selectedRunId]);
+  }, [toast, fetchFindings, fetchRuns]);
 
-  // Initial load + cleanup stale runs + check if fix-all is running
+  // Initial load
   useEffect(() => {
     const init = async () => {
       await fetchTotalArticles();
       await fetchRuns();
 
-      // Mark stale scanning runs as failed (>10 min old)
-      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      // Mark stale scanning runs as failed (>15 min old)
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       await supabase
         .from("content_audit_runs")
-        .update({ status: "failed", error_message: "Timed out (no response after 10 minutes)", completed_at: new Date().toISOString() })
+        .update({ status: "failed", error_message: "Timed out (container shutdown before completion)", completed_at: new Date().toISOString() })
         .in("status", ["scanning", "pending"])
-        .lt("started_at", tenMinAgo);
+        .lt("started_at", fifteenMinAgo);
 
       await fetchRuns();
-
-      // Check if a fix-all is currently running server-side, and poll for it
-      const { data: fixingRun } = await (supabase.from("content_audit_runs") as any)
-        .select("id")
-        .eq("fix_all_status", "fixing")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (fixingRun) {
-        setSelectedRunId(fixingRun.id);
-        // Just poll — the server is already doing the work
-        triggerFixAllForRun(fixingRun.id);
-      }
     };
     init();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -207,7 +173,7 @@ export default function ContentAuditTab() {
     if (selectedRunId) fetchFindings(selectedRunId);
   }, [selectedRunId, fetchFindings]);
 
-  // Poll for active runs
+  // Poll for active runs (for progress bar updates)
   useEffect(() => {
     const activeRun = runs.find(r => r.status === "scanning" || r.status === "pending");
     if (!activeRun) return;
@@ -218,53 +184,67 @@ export default function ContentAuditTab() {
     return () => clearInterval(interval);
   }, [runs, fetchRuns, fetchFindings, selectedRunId]);
 
+  // ── Chunked Scan: call edge function in a loop ─────────────────
   const handleRunAudit = async () => {
     setTriggering(true);
+    setScanProgress("Starting scan...");
+    abortRef.current = false;
 
-    // Fire-and-forget — the edge function runs in background
-    supabase.functions.invoke("ai-content-audit", {
-      body: { autoFix },
-    }).then(({ data, error }) => {
-      if (error) console.error("Audit invoke error:", error);
-      else console.log("Audit invoke response:", data);
-    }).catch((err) => {
-      console.error("Audit invoke failed:", err);
-    });
+    try {
+      let runId: string | undefined;
+      let iteration = 0;
 
-    // Give the server a moment to create the run row, then start polling
-    await new Promise(r => setTimeout(r, 2000));
-    await fetchRuns();
-    setTriggering(false);
+      while (!abortRef.current) {
+        iteration++;
+        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+          body: { autoFix, runId },
+        });
 
-    toast({ title: "Content Audit Started", description: "Scanning in the background — you can leave and come back." });
-
-    // Start polling in the background for progress
-    const pollId = setInterval(async () => {
-      await fetchRuns();
-      // Check if latest run is done
-      const { data: latestRuns } = await supabase
-        .from("content_audit_runs")
-        .select("id, status")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      
-      if (latestRuns) {
-        setSelectedRunId(latestRuns.id);
-        fetchFindings(latestRuns.id);
-        if (latestRuns.status === "completed" || latestRuns.status === "failed") {
-          clearInterval(pollId);
-          toast({ 
-            title: latestRuns.status === "completed" ? "Audit Complete" : "Audit Failed", 
-            description: latestRuns.status === "completed" ? "All articles scanned." : "Check the error details." 
-          });
-          // Auto-fix all remaining issues if enabled
-          if (autoFixAll && latestRuns.status === "completed") {
-            triggerFixAllForRun(latestRuns.id);
-          }
+        if (error) {
+          console.error("Audit chunk error:", error);
+          toast({ title: "Audit Error", description: error.message || "Failed during scan", variant: "destructive" });
+          break;
         }
+
+        if (data?.error) {
+          toast({ title: "Audit Error", description: data.error, variant: "destructive" });
+          break;
+        }
+
+        runId = data?.runId;
+        const remaining = data?.remaining ?? 0;
+        const phase = data?.phase ?? "scanning";
+
+        if (runId) {
+          setSelectedRunId(runId);
+          fetchRuns();
+          fetchFindings(runId);
+        }
+
+        if (phase === "done" || remaining === 0) {
+          toast({ title: "Content Audit Complete", description: "All articles scanned." });
+          break;
+        }
+
+        setScanProgress(`Scanning... ${remaining} articles remaining`);
+
+        // Small delay between chunks
+        await new Promise(r => setTimeout(r, 1000));
       }
-    }, 5000);
+
+      // After scan, auto-fix all if enabled
+      if (autoFixAll && runId) {
+        await triggerFixAllForRun(runId);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start audit";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
+      setTriggering(false);
+      setScanProgress("");
+      fetchRuns();
+      if (selectedRunId) fetchFindings(selectedRunId);
+    }
   };
 
   const handleApplyFix = async (findingId: string) => {
@@ -349,13 +329,13 @@ export default function ContentAuditTab() {
 
           <button
             onClick={handleRunAudit}
-            disabled={triggering || isRunning}
+            disabled={triggering || isRunning || fixingAll}
             className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50"
           >
             {triggering || isRunning ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                {isRunning ? "Scanning..." : "Starting..."}
+                {scanProgress || "Scanning..."}
               </>
             ) : (
               <>
@@ -442,30 +422,38 @@ export default function ContentAuditTab() {
               {findings.some(f => f.status !== "resolved" && f.article_id && f.suggestion) && (
                 <button
                   onClick={handleFixAll}
-                  disabled={fixingAll || !!applyingFix || isRunning}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                  disabled={fixingAll}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 disabled:opacity-50"
                 >
                   {fixingAll ? (
-                    <><Loader2 className="h-3 w-3 animate-spin" /> {fixAllProgress}</>
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {fixAllProgress || "Fixing..."}
+                    </>
                   ) : (
-                    <><Wrench className="h-3 w-3" /> Fix All Issues</>
+                    <>
+                      <Wrench className="h-3.5 w-3.5" />
+                      Fix All Issues
+                    </>
                   )}
                 </button>
               )}
+
               <select
                 value={filterType}
                 onChange={(e) => setFilterType(e.target.value)}
-                className="px-2 py-1 rounded-md border border-input bg-background text-foreground text-xs"
+                className="text-xs border border-input rounded-lg px-2 py-1.5 bg-background text-foreground"
               >
                 <option value="all">All Types</option>
                 {issueTypes.map(t => (
                   <option key={t} value={t}>{TYPE_LABELS[t] || t}</option>
                 ))}
               </select>
+
               <select
                 value={filterSeverity}
                 onChange={(e) => setFilterSeverity(e.target.value)}
-                className="px-2 py-1 rounded-md border border-input bg-background text-foreground text-xs"
+                className="text-xs border border-input rounded-lg px-2 py-1.5 bg-background text-foreground"
               >
                 <option value="all">All Severity</option>
                 <option value="critical">Critical</option>
@@ -475,56 +463,67 @@ export default function ContentAuditTab() {
             </div>
           </div>
 
-          <div className="space-y-2 max-h-[500px] overflow-y-auto">
+          <div className="space-y-3 max-h-[600px] overflow-y-auto">
             {filteredFindings.map((finding) => {
               const style = SEVERITY_STYLES[finding.severity] || SEVERITY_STYLES.info;
               const Icon = style.icon;
-              const isApplying = applyingFix === finding.id;
-              const canApplyFix = finding.status !== "resolved" && finding.article_id && finding.suggestion;
+
               return (
-                <div key={finding.id} className={`p-3 rounded-lg border border-border ${style.bg}`}>
+                <div key={finding.id} className={`${style.bg} border border-border/50 rounded-lg p-4`}>
                   <div className="flex items-start gap-2">
-                    <Icon className={`h-4 w-4 mt-0.5 flex-shrink-0 ${style.color}`} />
+                    <Icon className={`h-4 w-4 mt-0.5 ${style.color} shrink-0`} />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-xs font-medium ${style.color}`}>
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className={`text-xs font-semibold ${style.color}`}>
                           {TYPE_LABELS[finding.issue_type] || finding.issue_type}
                         </span>
                         {finding.auto_fixed && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
-                            ✓ Auto-fixed
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 font-medium flex items-center gap-0.5">
+                            <CheckCircle2 className="h-2.5 w-2.5" /> Auto-fixed
                           </span>
                         )}
                         {finding.status === "resolved" && !finding.auto_fixed && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 font-medium">
                             Resolved
                           </span>
                         )}
                       </div>
+
                       {finding.article_title && (
-                        <p className="text-xs font-medium text-foreground mt-1 truncate">
-                          📄 {finding.article_title}
+                        <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                          <span className="inline-block w-3 h-3 rounded bg-muted" />
+                          {finding.article_title}
                         </p>
                       )}
-                      <p className="text-xs text-foreground/80 mt-1">{finding.description}</p>
+
+                      <p className="text-sm text-foreground leading-relaxed">{finding.description}</p>
+
                       {finding.suggestion && (
-                        <p className="text-xs text-muted-foreground mt-1">
+                        <p className="text-xs text-muted-foreground mt-1.5">
                           💡 {finding.suggestion}
                         </p>
                       )}
+
                       {finding.fix_applied && (
-                        <p className="text-xs text-emerald-600 mt-1">
+                        <p className="text-xs mt-1.5 text-emerald-700 dark:text-emerald-300">
                           ✅ Fix: {finding.fix_applied}
                         </p>
                       )}
-                      {/* Apply Fix button */}
-                      {canApplyFix && (
+
+                      {finding.related_article_title && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Related: {finding.related_article_title}
+                        </p>
+                      )}
+
+                      {/* Show apply fix button for unresolved findings with suggestions */}
+                      {finding.status !== "resolved" && finding.article_id && finding.suggestion && (
                         <button
                           onClick={() => handleApplyFix(finding.id)}
-                          disabled={isApplying || !!applyingFix}
-                          className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                          disabled={applyingFix === finding.id}
+                          className="mt-2 flex items-center gap-1.5 px-3 py-1 bg-emerald-600 text-white rounded-md text-xs font-medium hover:bg-emerald-700 disabled:opacity-50"
                         >
-                          {isApplying ? (
+                          {applyingFix === finding.id ? (
                             <><Loader2 className="h-3 w-3 animate-spin" /> Applying...</>
                           ) : (
                             <><Wrench className="h-3 w-3" /> Apply Fix</>
@@ -536,42 +535,6 @@ export default function ContentAuditTab() {
                 </div>
               );
             })}
-          </div>
-        </div>
-      )}
-
-      {/* Previous Runs */}
-      {runs.length > 1 && (
-        <div className="bg-card border border-border rounded-xl p-5">
-          <h3 className="font-semibold text-foreground text-sm mb-3">Previous Audits</h3>
-          <div className="space-y-2">
-            {runs.map((run) => (
-              <button
-                key={run.id}
-                onClick={() => setSelectedRunId(run.id)}
-                className={`w-full text-left p-3 rounded-lg border transition-all hover:border-primary/30 ${
-                  selectedRunId === run.id ? "border-primary bg-primary/5" : "border-border bg-muted/30"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-foreground">
-                    {new Date(run.created_at).toLocaleString()}
-                  </span>
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                    run.status === "completed" ? "text-emerald-600 bg-emerald-50 dark:bg-emerald-950" :
-                    run.status === "failed" ? "text-red-600 bg-red-50 dark:bg-red-950" :
-                    "text-muted-foreground bg-muted"
-                  }`}>
-                    {run.status}
-                  </span>
-                </div>
-                <div className="flex items-center gap-3 mt-1 text-[10px] text-muted-foreground">
-                  <span>{run.total_articles_scanned} scanned</span>
-                  <span>{run.total_issues_found} issues</span>
-                  <span>{run.auto_fixes_applied} fixed</span>
-                </div>
-              </button>
-            ))}
           </div>
         </div>
       )}
