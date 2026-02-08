@@ -490,6 +490,39 @@ serve(async (req) => {
       return jsonResp({ success: true, ...result });
     }
 
+    // Handle "fix all" action - fix all open findings with suggestions
+    if (body.action === "fix_all" && body.runId) {
+      console.log(`Fixing all open findings for run: ${body.runId}`);
+      const db = serviceClient();
+      const { data: openFindings } = await db.from("content_audit_findings")
+        .select("id, article_id, suggestion")
+        .eq("run_id", body.runId)
+        .eq("status", "open")
+        .not("article_id", "is", null)
+        .not("suggestion", "is", null);
+
+      if (!openFindings || openFindings.length === 0) {
+        return jsonResp({ success: true, fixed: 0, message: "No fixable findings found" });
+      }
+
+      let fixed = 0;
+      let failed = 0;
+      for (const finding of openFindings) {
+        try {
+          await applyFixToArticle(finding.id);
+          fixed++;
+          console.log(`Fixed ${fixed}/${openFindings.length}`);
+          // Rate limit between fixes
+          if (fixed < openFindings.length) await delay(2000);
+        } catch (err) {
+          console.error(`Failed to fix finding ${finding.id}:`, err);
+          failed++;
+        }
+      }
+
+      return jsonResp({ success: true, fixed, failed, total: openFindings.length, message: `Fixed ${fixed} of ${openFindings.length} issues` });
+    }
+
     const autoFix = body.autoFix !== false;
     console.log(`Content audit triggered (autoFix: ${autoFix})`);
 

@@ -68,6 +68,8 @@ export default function ContentAuditTab() {
   const [filterType, setFilterType] = useState<string>("all");
   const [filterSeverity, setFilterSeverity] = useState<string>("all");
   const [applyingFix, setApplyingFix] = useState<string | null>(null);
+  const [fixingAll, setFixingAll] = useState(false);
+  const [fixAllProgress, setFixAllProgress] = useState("");
   const [totalArticles, setTotalArticles] = useState(0);
 
   const fetchRuns = useCallback(async () => {
@@ -180,6 +182,33 @@ export default function ContentAuditTab() {
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
       setApplyingFix(null);
+    }
+  };
+
+  const handleFixAll = async () => {
+    if (!selectedRunId) return;
+    const fixableCount = findings.filter(f => f.status !== "resolved" && f.article_id && f.suggestion).length;
+    if (fixableCount === 0) {
+      toast({ title: "Nothing to Fix", description: "No fixable findings found." });
+      return;
+    }
+    setFixingAll(true);
+    setFixAllProgress(`Fixing ${fixableCount} issues...`);
+    try {
+      const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+        body: { action: "fix_all", runId: selectedRunId },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({ title: "Fix All Complete", description: data.message || `Fixed ${data.fixed} issues.` });
+      fetchFindings(selectedRunId);
+      fetchRuns();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to fix all";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
+      setFixingAll(false);
+      setFixAllProgress("");
     }
   };
 
@@ -314,10 +343,24 @@ export default function ContentAuditTab() {
 
       {/* Findings */}
       {findings.length > 0 && (
-        <div className="bg-card border border-border rounded-xl p-5">
-          <div className="flex items-center justify-between mb-3">
+      <div className="bg-card border border-border rounded-xl p-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h3 className="font-semibold text-foreground text-sm">Findings ({filteredFindings.length})</h3>
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center flex-wrap">
+              {/* Fix All button */}
+              {findings.some(f => f.status !== "resolved" && f.article_id && f.suggestion) && (
+                <button
+                  onClick={handleFixAll}
+                  disabled={fixingAll || !!applyingFix || isRunning}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                >
+                  {fixingAll ? (
+                    <><Loader2 className="h-3 w-3 animate-spin" /> {fixAllProgress}</>
+                  ) : (
+                    <><Wrench className="h-3 w-3" /> Fix All Issues</>
+                  )}
+                </button>
+              )}
               <select
                 value={filterType}
                 onChange={(e) => setFilterType(e.target.value)}
