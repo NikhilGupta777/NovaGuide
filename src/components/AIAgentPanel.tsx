@@ -186,6 +186,8 @@ export default function AIAgentPanel() {
       .eq("status", "processing")
       .is("run_date", null);
 
+    const isProcessing = (processingCount || 0) > 0;
+
     if (data && data.length > 0) {
       const topics: DiscoveredTopic[] = data.map(d => ({
         topic: d.topic,
@@ -195,7 +197,11 @@ export default function AIAgentPanel() {
       }));
       setBatchQueue(topics);
       setBatchTotal(data.length + (processingCount || 0));
-    } else if ((processingCount || 0) > 0) {
+      // If anything is processing server-side, mark batch as running
+      if (isProcessing) {
+        setBatchRunning(true);
+      }
+    } else if (isProcessing) {
       // Items are being processed but none pending — batch is finishing
       setBatchRunning(true);
       setBatchTotal(processingCount || 0);
@@ -760,43 +766,38 @@ export default function AIAgentPanel() {
                 {batchRunning && (
                   <div className="mt-4">
                     <div className="flex items-center justify-between text-sm mb-1.5">
-                      <span className="text-muted-foreground">Generating...</span>
-                      <span className="font-medium text-foreground">{batchProgress} / {batchQueue.length}</span>
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        <span className="text-muted-foreground">Processing batch in background...</span>
+                      </div>
+                      <span className="font-medium text-foreground">{batchProgress} / {batchTotal}</span>
                     </div>
                     <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
                       <div
                         className="h-full bg-primary rounded-full transition-all duration-500"
-                        style={{ width: `${(batchProgress / batchQueue.length) * 100}%` }}
+                        style={{ width: `${batchTotal > 0 ? (batchProgress / batchTotal) * 100 : 0}%` }}
                       />
                     </div>
                   </div>
                 )}
 
                 <div className="flex gap-2 mt-4">
-                  <button
-                    onClick={handleBatchGenerate}
-                    disabled={batchRunning || batchQueue.length === 0 || isAnyOperationRunning}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors disabled:opacity-50"
-                  >
-                    {batchRunning ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Generating {batchProgress}/{batchQueue.length}...
-                      </>
-                    ) : (
-                      <>
-                        <Rocket className="h-4 w-4" />
-                        Generate All ({batchQueue.length})
-                      </>
-                    )}
-                  </button>
-                  {batchRunning && (
+                  {!batchRunning ? (
+                    <button
+                      onClick={handleBatchGenerate}
+                      disabled={batchQueue.length === 0 || isAnyOperationRunning}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors disabled:opacity-50"
+                    >
+                      <Rocket className="h-4 w-4" />
+                      Generate All ({batchQueue.length})
+                    </button>
+                  ) : (
                     <button
                       onClick={handleStopBatch}
-                      className="flex items-center justify-center gap-2 px-4 py-2.5 bg-destructive text-destructive-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-destructive text-destructive-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
                     >
                       <StopCircle className="h-4 w-4" />
-                      Stop
+                      Stop Batch ({batchProgress}/{batchTotal} done)
                     </button>
                   )}
                 </div>
