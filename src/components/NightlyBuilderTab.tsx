@@ -129,13 +129,15 @@ export default function NightlyBuilderTab() {
       await fetchRuns();
       await fetchQueueStats();
 
-      // Mark stale "researching" or "generating" runs as failed (>6 hours old)
+      // Mark stale "researching" or "generating" runs as failed (>6 hours without progress)
+      // Uses updated_at (auto-updated by trigger on every change) instead of started_at
+      // to avoid killing runs that are still actively generating articles
       const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
       await supabase
         .from("nightly_builder_runs")
-        .update({ status: "failed", error_message: "Timed out (no response after 6 hours)", completed_at: new Date().toISOString() })
+        .update({ status: "failed", error_message: "Timed out (no progress for 6 hours)", completed_at: new Date().toISOString() })
         .in("status", ["researching", "generating", "pending"])
-        .lt("started_at", sixHoursAgo);
+        .lt("updated_at", sixHoursAgo);
 
       // Fix: Only recover manual queue items stuck in "processing" for >15 minutes
       // Uses updated_at (set when status changed to "processing") instead of created_at
