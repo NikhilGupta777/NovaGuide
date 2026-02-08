@@ -3,9 +3,10 @@ import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import {
   Loader2, Search, Play, RefreshCw, CheckCircle2, AlertTriangle,
-  Info, XCircle, ChevronRight, FileText, Wrench, Eye
+  Info, XCircle, Wrench
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { Progress } from "@/components/ui/progress";
 
 type AuditRun = {
   id: string;
@@ -66,6 +67,8 @@ export default function ContentAuditTab() {
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState<string>("all");
   const [filterSeverity, setFilterSeverity] = useState<string>("all");
+  const [applyingFix, setApplyingFix] = useState<string | null>(null);
+  const [totalArticles, setTotalArticles] = useState(0);
 
   const fetchRuns = useCallback(async () => {
     const { data } = await supabase
@@ -92,7 +95,29 @@ export default function ContentAuditTab() {
     if (data) setFindings(data as unknown as AuditFinding[]);
   }, []);
 
-  useEffect(() => { fetchRuns(); }, [fetchRuns]);
+  const fetchTotalArticles = useCallback(async () => {
+    const { count } = await supabase.from("articles").select("*", { count: "exact", head: true });
+    if (count !== null) setTotalArticles(count);
+  }, []);
+
+  // Initial load + cleanup stale runs
+  useEffect(() => {
+    const init = async () => {
+      await fetchTotalArticles();
+      await fetchRuns();
+
+      // Mark stale scanning runs as failed (>10 min old)
+      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      await supabase
+        .from("content_audit_runs")
+        .update({ status: "failed", error_message: "Timed out (no response after 10 minutes)", completed_at: new Date().toISOString() })
+        .in("status", ["scanning", "pending"])
+        .lt("started_at", tenMinAgo);
+
+      await fetchRuns();
+    };
+    init();
+  }, [fetchRuns, fetchTotalArticles]);
 
   useEffect(() => {
     if (selectedRunId) fetchFindings(selectedRunId);
@@ -111,23 +136,54 @@ export default function ContentAuditTab() {
 
   const handleRunAudit = async () => {
     setTriggering(true);
+
+    const pollInterval = setInterval(() => {
+      fetchRuns();
+      if (selectedRunId) fetchFindings(selectedRunId);
+    }, 8000);
+
     try {
       const { data, error } = await supabase.functions.invoke("ai-content-audit", {
         body: { autoFix },
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      toast({ title: "Content Audit Started", description: "Scanning all articles in background..." });
-      setTimeout(() => fetchRuns(), 3000);
+
+      if (data?.success) {
+        toast({ title: "Content Audit Complete", description: data.message || "All articles scanned." });
+      } else {
+        toast({ title: "Audit Issue", description: data?.message || "Unexpected response", variant: "destructive" });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to start audit";
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
+      clearInterval(pollInterval);
       setTriggering(false);
+      fetchRuns();
+      if (selectedRunId) fetchFindings(selectedRunId);
     }
   };
 
-  const isRunning = runs.some(r => r.status === "scanning" || r.status === "pending");
+  const handleApplyFix = async (findingId: string) => {
+    setApplyingFix(findingId);
+    try {
+      const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+        body: { action: "apply_fix", findingId },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({ title: "Fix Applied", description: data.description || "Article updated successfully." });
+      if (selectedRunId) fetchFindings(selectedRunId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to apply fix";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
+      setApplyingFix(null);
+    }
+  };
+
+  const isRunning = triggering || runs.some(r => r.status === "scanning" || r.status === "pending");
   const selectedRun = runs.find(r => r.id === selectedRunId);
 
   const filteredFindings = findings.filter(f => {
@@ -137,6 +193,9 @@ export default function ContentAuditTab() {
   });
 
   const issueTypes = [...new Set(findings.map(f => f.issue_type))];
+  const progressPercent = selectedRun && totalArticles > 0
+    ? Math.round((selectedRun.total_articles_scanned / totalArticles) * 100)
+    : 0;
 
   if (loading) {
     return (
@@ -193,7 +252,7 @@ export default function ContentAuditTab() {
         <div className="bg-card border border-border rounded-xl p-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-foreground text-sm">
-              {selectedRun.status === "scanning" ? "Audit In Progress..." : "Audit Results"}
+              {selectedRun.status === "scanning" ? "Audit In Progress..." : selectedRun.status === "completed" ? "Audit Results" : "Audit " + selectedRun.status}
             </h3>
             <div className="flex items-center gap-2">
               <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
@@ -210,6 +269,17 @@ export default function ContentAuditTab() {
               </button>
             </div>
           </div>
+
+          {/* Progress bar for scanning */}
+          {selectedRun.status === "scanning" && totalArticles > 0 && (
+            <div className="mb-3">
+              <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                <span>{selectedRun.total_articles_scanned} / {totalArticles} articles</span>
+                <span>{progressPercent}%</span>
+              </div>
+              <Progress value={progressPercent} className="h-2" />
+            </div>
+          )}
 
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <div className="text-center p-2 rounded-lg bg-muted/50">
@@ -275,6 +345,8 @@ export default function ContentAuditTab() {
             {filteredFindings.map((finding) => {
               const style = SEVERITY_STYLES[finding.severity] || SEVERITY_STYLES.info;
               const Icon = style.icon;
+              const isApplying = applyingFix === finding.id;
+              const canApplyFix = finding.status !== "resolved" && finding.article_id && finding.suggestion;
               return (
                 <div key={finding.id} className={`p-3 rounded-lg border border-border ${style.bg}`}>
                   <div className="flex items-start gap-2">
@@ -310,6 +382,20 @@ export default function ContentAuditTab() {
                         <p className="text-xs text-emerald-600 mt-1">
                           ✅ Fix: {finding.fix_applied}
                         </p>
+                      )}
+                      {/* Apply Fix button */}
+                      {canApplyFix && (
+                        <button
+                          onClick={() => handleApplyFix(finding.id)}
+                          disabled={isApplying || !!applyingFix}
+                          className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                        >
+                          {isApplying ? (
+                            <><Loader2 className="h-3 w-3 animate-spin" /> Applying...</>
+                          ) : (
+                            <><Wrench className="h-3 w-3" /> Apply Fix</>
+                          )}
+                        </button>
                       )}
                     </div>
                   </div>
