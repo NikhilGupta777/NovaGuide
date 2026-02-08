@@ -24,9 +24,14 @@ const CategoryCard = ({ category }: CategoryCardProps) => {
       <h3 className="font-semibold text-card-foreground mb-1.5 group-hover:text-primary transition-colors">
         {category.name}
       </h3>
-      <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2">
+      <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2 mb-2">
         {category.description}
       </p>
+      {(category.article_count ?? 0) > 0 && (
+        <span className="text-xs text-muted-foreground">
+          {category.article_count} article{category.article_count !== 1 ? "s" : ""}
+        </span>
+      )}
     </Link>
   );
 };

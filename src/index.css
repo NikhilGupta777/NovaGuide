@@ -195,3 +195,31 @@
     @apply font-semibold;
   }
 }
+
+/* Print styles */
+@media print {
+  header, footer, .ad-placeholder, aside, .print\\:hidden,
+  nav[aria-label="Breadcrumb"], button {
+    display: none !important;
+  }
+
+  body {
+    font-size: 12pt;
+    color: #000;
+    background: #fff;
+  }
+
+  .container {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+
+  a {
+    color: #000;
+    text-decoration: underline;
+  }
+
+  .prose-article {
+    max-width: 100%;
+  }
+}

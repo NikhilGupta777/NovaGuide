@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Loader2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 import Layout from "@/components/Layout";
 import SEOHead from "@/components/SEOHead";
 import BreadcrumbNav from "@/components/BreadcrumbNav";
@@ -9,11 +10,15 @@ import AdPlaceholder from "@/components/AdPlaceholder";
 import { useCategories, useArticlesByCategory } from "@/hooks/useDatabase";
 import { getIconComponent, getCategoryColors } from "@/lib/iconMap";
 
+const PAGE_SIZE = 12;
+
 const CategoryPage = () => {
   const { slug } = useParams<{ slug: string }>();
+  const [page, setPage] = useState(1);
   const { categories, loading: catsLoading } = useCategories();
   const category = categories.find((c) => c.slug === slug);
-  const { articles: categoryArticles, loading: articlesLoading } = useArticlesByCategory(category?.id);
+  const { articles: categoryArticles, loading: articlesLoading, total } = useArticlesByCategory(category?.id, page, PAGE_SIZE);
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
   if (catsLoading) {
     return (
@@ -63,13 +68,36 @@ const CategoryPage = () => {
             {articlesLoading ? (
               <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
             ) : categoryArticles.length > 0 ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {categoryArticles.map((article, index) => (
-                  <motion.div key={article.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, delay: index * 0.08 }}>
-                    <ArticleCard article={article} categories={categories} />
-                  </motion.div>
-                ))}
-              </div>
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {categoryArticles.map((article, index) => (
+                    <motion.div key={article.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, delay: index * 0.08 }}>
+                      <ArticleCard article={article} categories={categories} />
+                    </motion.div>
+                  ))}
+                </div>
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-center gap-2 mt-8">
+                    <button
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page === 1}
+                      className="p-2 rounded-lg border border-border hover:bg-muted disabled:opacity-40 transition-colors"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <span className="text-sm text-muted-foreground px-3">
+                      Page {page} of {totalPages}
+                    </span>
+                    <button
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={page === totalPages}
+                      className="p-2 rounded-lg border border-border hover:bg-muted disabled:opacity-40 transition-colors"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="text-center py-12 bg-muted/50 rounded-xl">
                 <p className="text-muted-foreground">No articles in this category yet. Check back soon!</p>

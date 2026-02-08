@@ -110,6 +110,26 @@ export function useFeaturedArticles() {
   return { articles, loading };
 }
 
+export function usePopularArticles(limit = 6) {
+  const [articles, setArticles] = useState<DbArticle[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase
+      .from("articles")
+      .select("*")
+      .eq("status", "published")
+      .order("view_count" as any, { ascending: false })
+      .limit(limit)
+      .then(({ data }) => {
+        if (data) setArticles(data as DbArticle[]);
+        setLoading(false);
+      });
+  }, [limit]);
+
+  return { articles, loading };
+}
+
 export function useSearchArticles(query: string) {
   const [articles, setArticles] = useState<DbArticle[]>([]);
   const [loading, setLoading] = useState(false);
@@ -120,17 +140,10 @@ export function useSearchArticles(query: string) {
       return;
     }
     setLoading(true);
-    // Sanitize query: escape special Postgres LIKE chars and limit length
-    const sanitized = query.trim().slice(0, 200).replace(/%/g, "\\%").replace(/_/g, "\\_");
     supabase
-      .from("articles")
-      .select("*")
-      .eq("status", "published")
-      .or(`title.ilike.%${sanitized}%,excerpt.ilike.%${sanitized}%`)
-      .order("published_at", { ascending: false })
-      .limit(50)
+      .rpc("search_articles", { search_query: query.trim().slice(0, 200) })
       .then(({ data }) => {
-        if (data) setArticles(data);
+        if (data) setArticles(data as DbArticle[]);
         setLoading(false);
       });
   }, [query]);
@@ -138,9 +151,10 @@ export function useSearchArticles(query: string) {
   return { articles, loading };
 }
 
-export function useArticlesByCategory(categoryId: string | undefined) {
+export function useArticlesByCategory(categoryId: string | undefined, page = 1, pageSize = 12) {
   const [articles, setArticles] = useState<DbArticle[]>([]);
   const [loading, setLoading] = useState(false);
+  const [total, setTotal] = useState(0);
 
   useEffect(() => {
     if (!categoryId) {
@@ -149,17 +163,21 @@ export function useArticlesByCategory(categoryId: string | undefined) {
       return;
     }
     setLoading(true);
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
     supabase
       .from("articles")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("status", "published")
       .eq("category_id", categoryId)
       .order("published_at", { ascending: false })
-      .then(({ data }) => {
+      .range(from, to)
+      .then(({ data, count }) => {
         if (data) setArticles(data);
+        if (count !== null) setTotal(count);
         setLoading(false);
       });
-  }, [categoryId]);
+  }, [categoryId, page, pageSize]);
 
-  return { articles, loading };
+  return { articles, loading, total };
 }

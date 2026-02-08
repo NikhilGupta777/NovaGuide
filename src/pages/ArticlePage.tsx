@@ -1,14 +1,20 @@
 import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Clock, Calendar, Tag, ArrowLeft, Loader2 } from "lucide-react";
+import { Clock, Calendar, Tag, ArrowLeft, Loader2, Printer } from "lucide-react";
+import { useEffect } from "react";
 import Layout from "@/components/Layout";
 import SEOHead from "@/components/SEOHead";
 import BreadcrumbNav from "@/components/BreadcrumbNav";
 import MarkdownRenderer from "@/components/MarkdownRenderer";
 import ArticleCard from "@/components/ArticleCard";
 import AdPlaceholder from "@/components/AdPlaceholder";
+import ReadingProgress from "@/components/ReadingProgress";
+import ShareButtons from "@/components/ShareButtons";
+import TableOfContents from "@/components/TableOfContents";
+import ArticleFeedback from "@/components/ArticleFeedback";
 import { useArticleBySlug, useArticlesByCategory, useCategories } from "@/hooks/useDatabase";
 import { getCategoryColors } from "@/lib/iconMap";
+import { supabase } from "@/integrations/supabase/client";
 
 const ArticlePage = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -18,6 +24,13 @@ const ArticlePage = () => {
   const category = categories.find((c) => c.id === article?.category_id);
   const { articles: relatedArticles } = useArticlesByCategory(category?.id);
   const colors = category ? getCategoryColors(category.icon) : null;
+
+  // Increment view count
+  useEffect(() => {
+    if (slug && article) {
+      supabase.rpc("increment_view_count", { _slug: slug });
+    }
+  }, [slug, article?.id]);
 
   if (loading) {
     return (
@@ -42,9 +55,16 @@ const ArticlePage = () => {
     );
   }
 
-  const related = relatedArticles.filter((a) => a.id !== article.id).slice(0, 3);
+  // Smart related: prefer same tags, fallback to same category
+  const related = relatedArticles
+    .filter((a) => a.id !== article.id)
+    .sort((a, b) => {
+      const aTags = (a.tags || []).filter((t) => (article.tags || []).includes(t)).length;
+      const bTags = (b.tags || []).filter((t) => (article.tags || []).includes(t)).length;
+      return bTags - aTags;
+    })
+    .slice(0, 3);
 
-  // JSON-LD structured data
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "Article",
@@ -59,6 +79,7 @@ const ArticlePage = () => {
 
   return (
     <Layout>
+      <ReadingProgress />
       <SEOHead
         title={article.seo_title || article.title}
         description={article.seo_description || article.excerpt || ""}
@@ -88,7 +109,7 @@ const ArticlePage = () => {
                 )}
                 <h1 className="text-2xl md:text-4xl font-bold text-foreground leading-tight mb-4">{article.title}</h1>
                 <p className="text-lg text-muted-foreground leading-relaxed mb-4">{article.excerpt}</p>
-                <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+                <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground mb-4">
                   <span className="flex items-center gap-1.5"><Clock className="h-4 w-4" />{article.read_time} min read</span>
                   {article.published_at && (
                     <span className="flex items-center gap-1.5">
@@ -96,6 +117,15 @@ const ArticlePage = () => {
                       {new Date(article.published_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
                     </span>
                   )}
+                  {(article as any).view_count > 0 && (
+                    <span className="text-xs text-muted-foreground">{(article as any).view_count} views</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
+                  <ShareButtons title={article.title} />
+                  <button onClick={() => window.print()} className="p-2 rounded-lg hover:bg-muted transition-colors print:hidden" aria-label="Print">
+                    <Printer className="h-4 w-4 text-muted-foreground" />
+                  </button>
                 </div>
               </header>
 
@@ -103,6 +133,16 @@ const ArticlePage = () => {
               {article.content && <MarkdownRenderer content={article.content} />}
 
               <div className="my-8"><AdPlaceholder type="inline" className="max-w-md mx-auto" /></div>
+
+              {/* Article Feedback */}
+              <div className="my-8">
+                <ArticleFeedback articleId={article.id} />
+              </div>
+
+              {/* Share again at bottom */}
+              <div className="my-6 print:hidden">
+                <ShareButtons title={article.title} />
+              </div>
 
               {article.tags && article.tags.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 mt-8 pt-6 border-t border-border">
@@ -134,7 +174,8 @@ const ArticlePage = () => {
             </motion.div>
           </div>
 
-          <aside className="space-y-6">
+          <aside className="space-y-6 print:hidden">
+            {article.content && <TableOfContents content={article.content} />}
             <AdPlaceholder type="sidebar" />
             {related.length > 0 && (
               <div className="bg-card rounded-xl border border-border p-5">
