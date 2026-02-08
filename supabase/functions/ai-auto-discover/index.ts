@@ -88,7 +88,7 @@ serve(async (req) => {
       });
     }
 
-    const { count = 5, targetCategories = [], discoverRunId } = await req.json();
+    const { count = 5, targetCategories = [], discoverRunId, autoMake = false, autoPublish = false } = await req.json();
 
     // Fetch existing articles and categories
     const [categoriesRes, articlesRes] = await Promise.all([
@@ -228,14 +228,51 @@ Return ONLY valid JSON, no markdown, no explanation.`;
       console.log("Updated discover_run:", discoverRunId);
     }
 
+    // If autoMake is enabled, handle queue + batch trigger server-side
+    let batchTriggered = false;
+    if (autoMake && result.topics?.length > 0) {
+      console.log("Auto-make enabled: inserting", result.topics.length, "topics into nightly_builder_queue");
+      const insertRows = result.topics.map((t: { topic: string; category_id?: string; priority?: string }) => ({
+        topic: t.topic,
+        category_id: t.category_id || null,
+        priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
+        status: "pending",
+      }));
+
+      const { error: queueError } = await db.from("nightly_builder_queue").insert(insertRows);
+      if (queueError) {
+        console.error("Failed to insert queue items:", queueError);
+      } else {
+        console.log("Queue items inserted, triggering ai-nightly-builder...");
+        batchTriggered = true;
+
+        // Fire-and-forget: trigger batch generation server-side
+        const batchUrl = `${SUPABASE_URL}/functions/v1/ai-nightly-builder`;
+        EdgeRuntime.waitUntil(
+          fetch(batchUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify({ action: "start_manual_batch", autoPublish }),
+          }).then(resp => {
+            console.log("Batch trigger response:", resp.status);
+          }).catch(err => {
+            console.error("Failed to trigger batch:", err);
+          })
+        );
+      }
+    }
+
     // Log the discovery
     await db.from("agent_logs").insert({
-      action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)`,
+      action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)${batchTriggered ? " + batch triggered" : ""}`,
       status: "completed",
-      details: { topics: result.topics, mode: "auto_discover", models: { research: MODEL_RESEARCH, parse: MODEL_PARSE } },
+      details: { topics: result.topics, mode: "auto_discover", autoMake, autoPublish, batchTriggered, models: { research: MODEL_RESEARCH, parse: MODEL_PARSE } },
     });
 
-    return new Response(JSON.stringify(result), {
+    return new Response(JSON.stringify({ ...result, batchTriggered }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 

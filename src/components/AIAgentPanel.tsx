@@ -146,7 +146,7 @@ export default function AIAgentPanel() {
     }
   }, []);
 
-  // Load latest discover run from DB
+  // Load latest discover run from DB — also detect if pipeline was running
   const fetchLatestDiscoverRun = useCallback(async () => {
     const { data } = await supabase
       .from("discover_runs")
@@ -160,6 +160,8 @@ export default function AIAgentPanel() {
       if (data.status === "running") {
         setDiscovering(true);
         setDiscoverRunId(data.id);
+        // If a discover run is still running, the pipeline might be active
+        // The batch polling will pick it up via fetchBatchQueue
       } else {
         setDiscovering(false);
         setDiscoverRunId(null);
@@ -344,51 +346,46 @@ export default function AIAgentPanel() {
     const runId = runData?.id;
     if (runId) setDiscoverRunId(runId);
 
+    // If autoMake is on, set batch state immediately (fire-and-forget)
+    if (autoMake) {
+      setBatchRunning(true);
+      setBatchTotal(discoverCount);
+    }
+
     try {
-      // Fire and forget — edge function will update DB directly
-      // Pass discoverRunId so the edge function can persist results server-side
+      // Pass autoMake and autoPublish to edge function
+      // The edge function handles queue insertion + batch trigger server-side
       const { data, error } = await supabase.functions.invoke("ai-auto-discover", {
-        body: { count: discoverCount, targetCategories: [], discoverRunId: runId },
+        body: { count: discoverCount, targetCategories: [], discoverRunId: runId, autoMake, autoPublish },
       });
       if (error) throw error;
       const topics = data?.topics || [];
       setDiscoveredTopics(topics);
-      // Edge function already updated the DB, just update local state
       setDiscoverRunId(null);
       setDiscovering(false);
-      toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
 
-      // Auto-make: push all to batch and start generating server-side
       if (autoMake && topics.length > 0) {
-        // Insert all discovered topics into the batch queue
-        const insertRows = topics.map(t => ({
-          topic: t.topic,
-          category_id: t.category_id || null,
-          priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
-          status: "pending" as const,
-        }));
-
-        const { error: queueError } = await supabase
-          .from("nightly_builder_queue")
-          .insert(insertRows);
-
-        if (queueError) {
-          console.error("Failed to insert batch queue items:", queueError);
-          toast({ title: "Queue Error", description: "Failed to add topics to batch queue. Try adding them manually.", variant: "destructive" });
-        } else {
-          setBatchQueue(topics);
-          setBatchTotal(topics.length);
-          toast({ title: "Auto-Make Active", description: `Queued ${topics.length} topics — starting batch generation...` });
-          await startServerBatch();
-        }
+        setBatchTotal(topics.length);
+        setBatchQueue(topics);
+        toast({ title: "Pipeline Active", description: `${topics.length} topics queued — generating in background. You can close this page.` });
+      } else if (autoMake && topics.length === 0) {
+        setBatchRunning(false);
+        toast({ title: "No Topics Found", description: "Discovery returned no topics.", variant: "destructive" });
+      } else {
+        toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
       }
     } catch (err: unknown) {
-      // Edge function error handler already marks the run as failed in DB
-      // But if client-side error (network), mark it here too
-      const msg = err instanceof Error ? err.message : "Discovery failed";
-      setDiscoverRunId(null);
-      setDiscovering(false);
-      toast({ title: "Error", description: msg, variant: "destructive" });
+      // Even if the browser loses connection, the edge function continues server-side
+      // The polling will pick up the results
+      if (autoMake) {
+        setDiscovering(false);
+        toast({ title: "Pipeline Started", description: "Running in background. You can close this page and check back later." });
+      } else {
+        const msg = err instanceof Error ? err.message : "Discovery failed";
+        setDiscoverRunId(null);
+        setDiscovering(false);
+        toast({ title: "Error", description: msg, variant: "destructive" });
+      }
     }
   };
 
