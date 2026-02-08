@@ -104,6 +104,35 @@ export type Database = {
         }
         Relationships: []
       }
+      article_feedback: {
+        Row: {
+          article_id: string
+          created_at: string | null
+          helpful: boolean
+          id: string
+        }
+        Insert: {
+          article_id: string
+          created_at?: string | null
+          helpful: boolean
+          id?: string
+        }
+        Update: {
+          article_id?: string
+          created_at?: string | null
+          helpful?: boolean
+          id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "article_feedback_article_id_fkey"
+            columns: ["article_id"]
+            isOneToOne: false
+            referencedRelation: "articles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       articles: {
         Row: {
           ai_generated: boolean | null
@@ -116,6 +145,7 @@ export type Database = {
           id: string
           published_at: string | null
           read_time: number | null
+          search_vector: unknown
           seo_description: string | null
           seo_title: string | null
           slug: string
@@ -124,6 +154,7 @@ export type Database = {
           tags: string[] | null
           title: string
           updated_at: string | null
+          view_count: number | null
         }
         Insert: {
           ai_generated?: boolean | null
@@ -136,6 +167,7 @@ export type Database = {
           id?: string
           published_at?: string | null
           read_time?: number | null
+          search_vector?: unknown
           seo_description?: string | null
           seo_title?: string | null
           slug: string
@@ -144,6 +176,7 @@ export type Database = {
           tags?: string[] | null
           title: string
           updated_at?: string | null
+          view_count?: number | null
         }
         Update: {
           ai_generated?: boolean | null
@@ -156,6 +189,7 @@ export type Database = {
           id?: string
           published_at?: string | null
           read_time?: number | null
+          search_vector?: unknown
           seo_description?: string | null
           seo_title?: string | null
           slug?: string
@@ -164,6 +198,7 @@ export type Database = {
           tags?: string[] | null
           title?: string
           updated_at?: string | null
+          view_count?: number | null
         }
         Relationships: [
           {
@@ -244,6 +279,36 @@ export type Database = {
           slug?: string
           sort_order?: number | null
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      contact_submissions: {
+        Row: {
+          created_at: string | null
+          email: string
+          id: string
+          message: string
+          name: string
+          read: boolean | null
+          subject: string
+        }
+        Insert: {
+          created_at?: string | null
+          email: string
+          id?: string
+          message: string
+          name: string
+          read?: boolean | null
+          subject: string
+        }
+        Update: {
+          created_at?: string | null
+          email?: string
+          id?: string
+          message?: string
+          name?: string
+          read?: boolean | null
+          subject?: string
         }
         Relationships: []
       }
@@ -382,6 +447,24 @@ export type Database = {
           status?: string
           topic_count?: number
           topics?: Json
+        }
+        Relationships: []
+      }
+      email_subscribers: {
+        Row: {
+          email: string
+          id: string
+          subscribed_at: string | null
+        }
+        Insert: {
+          email: string
+          id?: string
+          subscribed_at?: string | null
+        }
+        Update: {
+          email?: string
+          id?: string
+          subscribed_at?: string | null
         }
         Relationships: []
       }
@@ -557,6 +640,38 @@ export type Database = {
           _user_id: string
         }
         Returns: boolean
+      }
+      increment_view_count: { Args: { _slug: string }; Returns: undefined }
+      search_articles: {
+        Args: { search_query: string }
+        Returns: {
+          ai_generated: boolean | null
+          author_id: string | null
+          category_id: string | null
+          content: string | null
+          created_at: string | null
+          excerpt: string | null
+          featured: boolean | null
+          id: string
+          published_at: string | null
+          read_time: number | null
+          search_vector: unknown
+          seo_description: string | null
+          seo_title: string | null
+          slug: string
+          sources: Json | null
+          status: string | null
+          tags: string[] | null
+          title: string
+          updated_at: string | null
+          view_count: number | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "articles"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
     }
     Enums: {

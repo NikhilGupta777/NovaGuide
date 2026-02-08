@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.ai-content-audit]
 verify_jwt = false
+
+[functions.sitemap]
+verify_jwt = false

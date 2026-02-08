@@ -171,12 +171,15 @@ const MarkdownRenderer = ({ content }: MarkdownRendererProps) => {
     }
 
     // Headings
+    const makeId = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
     if (line.startsWith("# ") && !line.startsWith("## ")) {
       flushOrderedList();
       flushUnorderedList();
+      const text = line.replace("# ", "");
       elements.push(
-        <h1 key={index} className="text-3xl font-bold mt-10 mb-5 text-foreground">
-          {renderInline(line.replace("# ", ""))}
+        <h1 key={index} id={makeId(text)} className="text-3xl font-bold mt-10 mb-5 text-foreground scroll-mt-20">
+          {renderInline(text)}
         </h1>
       );
       return;
@@ -184,9 +187,10 @@ const MarkdownRenderer = ({ content }: MarkdownRendererProps) => {
     if (line.startsWith("## ")) {
       flushOrderedList();
       flushUnorderedList();
+      const text = line.replace("## ", "");
       elements.push(
-        <h2 key={index} className="text-2xl font-bold mt-8 mb-4 text-foreground">
-          {renderInline(line.replace("## ", ""))}
+        <h2 key={index} id={makeId(text)} className="text-2xl font-bold mt-8 mb-4 text-foreground scroll-mt-20">
+          {renderInline(text)}
         </h2>
       );
       return;
@@ -194,9 +198,10 @@ const MarkdownRenderer = ({ content }: MarkdownRendererProps) => {
     if (line.startsWith("### ")) {
       flushOrderedList();
       flushUnorderedList();
+      const text = line.replace("### ", "");
       elements.push(
-        <h3 key={index} className="text-xl font-semibold mt-6 mb-3 text-foreground">
-          {renderInline(line.replace("### ", ""))}
+        <h3 key={index} id={makeId(text)} className="text-xl font-semibold mt-6 mb-3 text-foreground scroll-mt-20">
+          {renderInline(text)}
         </h3>
       );
       return;
@@ -204,9 +209,10 @@ const MarkdownRenderer = ({ content }: MarkdownRendererProps) => {
     if (line.startsWith("#### ")) {
       flushOrderedList();
       flushUnorderedList();
+      const text = line.replace("#### ", "");
       elements.push(
-        <h4 key={index} className="text-lg font-semibold mt-5 mb-2 text-foreground">
-          {renderInline(line.replace("#### ", ""))}
+        <h4 key={index} id={makeId(text)} className="text-lg font-semibold mt-5 mb-2 text-foreground scroll-mt-20">
+          {renderInline(text)}
         </h4>
       );
       return;
