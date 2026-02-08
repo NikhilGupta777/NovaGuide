@@ -42,13 +42,19 @@ Deno.serve(async (req) => {
     } else if (oldCategories && oldCategories.length > 0) {
       addLog(`Found ${oldCategories.length} categories`);
 
-      // Delete seed categories first so we can use the old IDs
+      // Delete existing categories first so we can use the old IDs
       await newClient.from("categories").delete().neq("id", "00000000-0000-0000-0000-000000000000");
       addLog("Cleared seed categories");
 
+      // Strip columns that don't exist in the new schema
+      const cleanedCats = oldCategories.map((c: any) => {
+        const { parent_id, ...rest } = c;
+        return rest;
+      });
+
       const { error: catInsertErr } = await newClient
         .from("categories")
-        .upsert(oldCategories, { onConflict: "slug" });
+        .upsert(cleanedCats, { onConflict: "slug" });
 
       if (catInsertErr) {
         addLog(`❌ Error inserting categories: ${catInsertErr.message}`);
