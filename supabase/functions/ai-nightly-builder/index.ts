@@ -8,8 +8,8 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-pro";
-const MODEL_LITE = "gemini-2.5-flash";
+const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_LITE = "gemini-2.5-flash-lite";
 
 // Safe icons that exist in the frontend iconMap
 const SAFE_ICONS = [
@@ -84,14 +84,14 @@ EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest these again):
 ${existingTitles.length > 0 ? existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
 
 YOUR TASK:
-Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}" in the tech/digital help space.
+Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}".
 
 Focus on:
 - Questions real people ask on Google, Reddit, Quora, forums
 - Common problems and troubleshooting guides
 - Step-by-step how-to guides
 - Beginner-friendly topics that get high search volume
-- Recent/trending topics (2024-2026)
+- Recent/trending topics (2025-2026)
 
 IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
 
