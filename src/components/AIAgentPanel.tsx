@@ -676,7 +676,22 @@ export default function AIAgentPanel() {
                           Add all to batch →
                         </button>
                         <button
-                          onClick={() => setDiscoveredTopics([])}
+                          onClick={async () => {
+                            setDiscoveredTopics([]);
+                            // Also clear from DB so they don't reappear on refresh
+                            const { data: latestRun } = await supabase
+                              .from("discover_runs")
+                              .select("id")
+                              .order("created_at", { ascending: false })
+                              .limit(1)
+                              .maybeSingle();
+                            if (latestRun) {
+                              await supabase
+                                .from("discover_runs")
+                                .update({ topics: [], topic_count: 0 })
+                                .eq("id", latestRun.id);
+                            }
+                          }}
                           className="text-xs text-muted-foreground hover:text-destructive"
                         >
                           Clear
