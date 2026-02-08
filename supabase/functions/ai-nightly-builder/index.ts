@@ -247,21 +247,33 @@ Return ONLY a valid JSON array of strings. Each string should be a specific, act
 Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
 
   const url = `${GEMINI_BASE}/models/${MODEL_LITE}:generateContent?key=${apiKey}`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
-      generationConfig: { temperature: 0.3 },
-      systemInstruction: { parts: [{ text: "Extract topics from research and return as a JSON array of strings. No markdown, no explanation." }] },
-    }),
-  });
 
-  if (!resp.ok) {
+  let resp: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
+        generationConfig: { temperature: 0.3 },
+        systemInstruction: { parts: [{ text: "Extract topics from research and return as a JSON array of strings. No markdown, no explanation." }] },
+      }),
+    });
+
+    if (resp.ok) break;
+
     const txt = await resp.text();
-    console.error(`[Parse] Error:`, resp.status, txt);
+    console.error(`[Parse] Error (attempt ${attempt + 1}/3):`, resp.status, txt);
+    if (resp.status === 429 && attempt < 2) {
+      const waitMs = 15000 + Math.random() * 15000;
+      console.log(`[Parse] Rate limited, waiting ${Math.round(waitMs / 1000)}s...`);
+      await delay(waitMs);
+      continue;
+    }
     return [];
   }
+
+  if (!resp || !resp.ok) return [];
 
   const data = await resp.json();
   const candidates = data.candidates || [];

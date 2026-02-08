@@ -19,7 +19,8 @@ async function callGemini(
   contents: unknown[],
   tools?: unknown[],
   systemInstruction?: string,
-  toolConfig?: unknown
+  toolConfig?: unknown,
+  retryCount = 0
 ) {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
   const body: Record<string, unknown> = { contents, generation_config: { temperature: 0.8 } };
@@ -27,7 +28,7 @@ async function callGemini(
   if (systemInstruction) body.system_instruction = { parts: [{ text: systemInstruction }] };
   if (toolConfig) body.tool_config = toolConfig;
 
-  console.log(`Calling Gemini model: ${model}, tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : 'none'}`);
+  console.log(`Calling Gemini model: ${model} (attempt ${retryCount + 1}), tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : 'none'}`);
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -37,7 +38,13 @@ async function callGemini(
   if (!resp.ok) {
     const txt = await resp.text();
     console.error("Gemini API error:", resp.status, txt);
-    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Try again later." };
+    if (resp.status === 429 && retryCount < 3) {
+      const waitMs = 15000 + Math.random() * 15000;
+      console.log(`Rate limited (attempt ${retryCount + 1}/3), waiting ${Math.round(waitMs / 1000)}s...`);
+      await new Promise(r => setTimeout(r, waitMs));
+      return callGemini(apiKey, model, contents, tools, systemInstruction, toolConfig, retryCount + 1);
+    }
+    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded after retries." };
     throw new Error(`Gemini API returned ${resp.status}: ${txt.slice(0, 200)}`);
   }
   return resp.json();
