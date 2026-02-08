@@ -184,7 +184,7 @@ Return your analysis using the check_duplicate function.`;
 Existing articles:
 ${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
-Is this topic too similar to any existing article? A score of 80+ means it's a duplicate.`;
+Is this topic too similar to any existing article? A score of 90+ means it's a duplicate (only skip if topics are nearly identical).`;
 
   const response = await callGemini(apiKey, MODEL_LITE, [
     { role: "user", parts: [{ text: prompt }] }
@@ -211,7 +211,7 @@ Is this topic too similar to any existing article? A score of 80+ means it's a d
   if (!args) return { isDuplicate: false };
 
   return {
-    isDuplicate: Boolean(args.is_duplicate) && (args.similarity_score as number) >= 80,
+    isDuplicate: Boolean(args.is_duplicate) && (args.similarity_score as number) >= 90,
     similarTitle: args.similar_to as string,
     score: args.similarity_score as number
   };
@@ -549,7 +549,7 @@ serve(async (req) => {
     if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured. Add your Google Gemini API key in settings.");
 
     const { user, db } = await authenticateAdmin(req);
-    const { topic, categoryId, mode = "manual" } = await req.json();
+    const { topic, categoryId, mode = "manual", skipDuplicateCheck = false } = await req.json();
 
     if (!topic) return jsonResp({ error: "Topic is required" }, 400);
 
@@ -579,29 +579,33 @@ serve(async (req) => {
     const runId = run.id;
 
     try {
-      // STEP 1: Duplicate Check (Flash Lite - cheapest)
+      // STEP 1: Duplicate Check (Flash Lite - cheapest) — skippable via force retry
       await updateRunStatus(db, runId, "checking", 1);
-      const dupCheck = await step1_duplicateCheck(GEMINI_API_KEY, topic, existingTitles);
+      if (!skipDuplicateCheck) {
+        const dupCheck = await step1_duplicateCheck(GEMINI_API_KEY, topic, existingTitles);
 
-      if (dupCheck.isDuplicate) {
-        await db.from("agent_runs").update({
-          status: "skipped",
-          current_step: 1,
-          error_message: `Topic too similar to existing article: "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
-          completed_at: new Date().toISOString(),
-        }).eq("id", runId);
+        if (dupCheck.isDuplicate) {
+          await db.from("agent_runs").update({
+            status: "skipped",
+            current_step: 1,
+            error_message: `Topic too similar to existing article: "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
+            completed_at: new Date().toISOString(),
+          }).eq("id", runId);
 
-        await db.from("agent_logs").insert({
-          action: `Duplicate skipped: "${topic}"`,
-          status: "skipped",
-          details: { similar_to: dupCheck.similarTitle, score: dupCheck.score, run_id: runId },
-        });
+          await db.from("agent_logs").insert({
+            action: `Duplicate skipped: "${topic}"`,
+            status: "skipped",
+            details: { similar_to: dupCheck.similarTitle, score: dupCheck.score, run_id: runId },
+          });
 
-        return jsonResp({
-          skipped: true,
-          reason: `Topic too similar to "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
-          _run_id: runId,
-        });
+          return jsonResp({
+            skipped: true,
+            reason: `Topic too similar to "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
+            _run_id: runId,
+          });
+        }
+      } else {
+        console.log("Duplicate check skipped (force retry)");
       }
 
       await delay(2000);
