@@ -250,7 +250,7 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Discover topics — persists to DB so results survive navigation
+  // Discover topics — edge function persists results to DB, client polls for completion
   const handleDiscover = async () => {
     setDiscovering(true);
     setDiscoveredTopics([]);
@@ -265,23 +265,17 @@ export default function AIAgentPanel() {
     if (runId) setDiscoverRunId(runId);
 
     try {
+      // Fire and forget — edge function will update DB directly
+      // Pass discoverRunId so the edge function can persist results server-side
       const { data, error } = await supabase.functions.invoke("ai-auto-discover", {
-        body: { count: discoverCount, targetCategories: [] },
+        body: { count: discoverCount, targetCategories: [], discoverRunId: runId },
       });
       if (error) throw error;
-      const topics = data.topics || [];
+      const topics = data?.topics || [];
       setDiscoveredTopics(topics);
-
-      // Persist results to DB
-      if (runId) {
-        await supabase.from("discover_runs").update({
-          status: "completed",
-          topics: JSON.parse(JSON.stringify(topics)),
-          topic_count: topics.length,
-          completed_at: new Date().toISOString(),
-        }).eq("id", runId);
-      }
+      // Edge function already updated the DB, just update local state
       setDiscoverRunId(null);
+      setDiscovering(false);
       toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
 
       // Auto-make: push all to batch and start generating
@@ -291,19 +285,12 @@ export default function AIAgentPanel() {
         await runBatch(topics);
       }
     } catch (err: unknown) {
+      // Edge function error handler already marks the run as failed in DB
+      // But if client-side error (network), mark it here too
       const msg = err instanceof Error ? err.message : "Discovery failed";
-      // Persist failure to DB
-      if (runId) {
-        await supabase.from("discover_runs").update({
-          status: "failed",
-          error_message: msg,
-          completed_at: new Date().toISOString(),
-        }).eq("id", runId);
-      }
       setDiscoverRunId(null);
-      toast({ title: "Error", description: msg, variant: "destructive" });
-    } finally {
       setDiscovering(false);
+      toast({ title: "Error", description: msg, variant: "destructive" });
     }
   };
 
