@@ -6,12 +6,11 @@ import {
   Bot, Loader2, Sparkles, Search as SearchIcon, Play, Zap, CheckCircle2,
   FileText, Clock, AlertTriangle, Lightbulb, Rocket, RefreshCw, ArrowRight,
   TrendingUp, Target, ChevronRight, Eye, Star, Shield, Globe, Timer,
-  Power, StopCircle, Settings2, CalendarClock, Moon, ClipboardCheck
+  Power, StopCircle, Settings2, Moon, ClipboardCheck
 } from "lucide-react";
 import NightlyBuilderTab from "@/components/NightlyBuilderTab";
 import ContentAuditTab from "@/components/ContentAuditTab";
 import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
 type DiscoveredTopic = {
@@ -39,16 +38,6 @@ type PipelineRun = {
   factual_score: number | null;
 };
 
-type AutoSettings = {
-  id: string;
-  enabled: boolean;
-  frequency: string;
-  articles_per_run: number;
-  target_categories: string[] | null;
-  last_run_at: string | null;
-  next_run_at: string | null;
-};
-
 const PIPELINE_STEPS = [
   { key: "checking", label: "Duplicate Check", icon: Shield, description: "Flash Lite — cheapest model for simple checks" },
   { key: "researching", label: "Web Research", icon: Globe, description: "2.5 Flash + Google Search — real web grounding" },
@@ -71,14 +60,6 @@ const STATUS_COLORS: Record<string, string> = {
   skipped: "text-gray-600 bg-gray-50 dark:text-gray-400 dark:bg-gray-950",
   needs_review: "text-orange-600 bg-orange-50 dark:text-orange-400 dark:bg-orange-950",
 };
-
-const FREQUENCY_OPTIONS = [
-  { value: "every_6_hours", label: "Every 6 hours" },
-  { value: "every_12_hours", label: "Every 12 hours" },
-  { value: "daily", label: "Daily" },
-  { value: "every_2_days", label: "Every 2 days" },
-  { value: "weekly", label: "Weekly" },
-];
 
 export default function AIAgentPanel() {
   const { categories } = useCategories();
@@ -104,11 +85,6 @@ export default function AIAgentPanel() {
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchTotal, setBatchTotal] = useState(0);
 
-  // Automation
-  const [autoSettings, setAutoSettings] = useState<AutoSettings | null>(null);
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [autoTargetCats, setAutoTargetCats] = useState<string[]>([]);
-
   // Pipeline runs
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<PipelineRun | null>(null);
@@ -133,19 +109,6 @@ export default function AIAgentPanel() {
     }
   }, [runsLimit]);
 
-  // Load automation settings
-  const fetchAutoSettings = useCallback(async () => {
-    const { data } = await supabase
-      .from("auto_generation_settings")
-      .select("*")
-      .limit(1)
-      .maybeSingle();
-    if (data) {
-      setAutoSettings(data as unknown as AutoSettings);
-      setAutoTargetCats((data.target_categories as string[]) || []);
-    }
-  }, []);
-
   // Load latest discover run from DB — also detect if pipeline was running
   const fetchLatestDiscoverRun = useCallback(async () => {
     const { data } = await supabase
@@ -160,8 +123,6 @@ export default function AIAgentPanel() {
       if (data.status === "running") {
         setDiscovering(true);
         setDiscoverRunId(data.id);
-        // If a discover run is still running, the pipeline might be active
-        // The batch polling will pick it up via fetchBatchQueue
       } else {
         setDiscovering(false);
         setDiscoverRunId(null);
@@ -211,7 +172,6 @@ export default function AIAgentPanel() {
         setBatchRunning(true);
       }
     } else if (isProcessing) {
-      // Items are being processed but none pending — batch is finishing
       setBatchRunning(true);
       setBatchTotal(totalAll);
       setBatchProgress(doneCount || 0);
@@ -227,7 +187,6 @@ export default function AIAgentPanel() {
   useEffect(() => {
     const init = async () => {
       await fetchRuns();
-      await fetchAutoSettings();
       await fetchLatestDiscoverRun();
       await fetchBatchQueue();
     };
@@ -261,14 +220,12 @@ export default function AIAgentPanel() {
   useEffect(() => {
     if (!batchRunning) return;
     const interval = setInterval(async () => {
-      // Count completed + failed + skipped items (done)
       const { count: doneCount } = await supabase
         .from("nightly_builder_queue")
         .select("*", { count: "exact", head: true })
         .in("status", ["completed", "failed", "skipped"])
         .is("run_date", null);
 
-      // Count still pending + processing
       const { count: pendingCount } = await supabase
         .from("nightly_builder_queue")
         .select("*", { count: "exact", head: true })
@@ -281,7 +238,6 @@ export default function AIAgentPanel() {
       setBatchTotal(done + pending);
       
       if (pending === 0) {
-        // Batch complete
         setBatchRunning(false);
         setBatchQueue([]);
         toast({ title: "Batch Complete!", description: `Processed ${doneCount || 0} articles.` });
@@ -351,12 +307,11 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Discover topics — edge function persists results to DB, client polls for completion
+  // Discover topics
   const handleDiscover = async () => {
     setDiscovering(true);
     setDiscoveredTopics([]);
 
-    // Create a "running" record in DB
     const { data: runData } = await supabase
       .from("discover_runs")
       .insert({ status: "running", topic_count: discoverCount })
@@ -365,15 +320,12 @@ export default function AIAgentPanel() {
     const runId = runData?.id;
     if (runId) setDiscoverRunId(runId);
 
-    // If autoMake is on, set batch state immediately (fire-and-forget)
     if (autoMake) {
       setBatchRunning(true);
       setBatchTotal(discoverCount);
     }
 
     try {
-      // Pass autoMake and autoPublish to edge function
-      // The edge function handles queue insertion + batch trigger server-side
       const { data, error } = await supabase.functions.invoke("ai-auto-discover", {
         body: { count: discoverCount, targetCategories: [], discoverRunId: runId, autoMake, autoPublish },
       });
@@ -394,8 +346,6 @@ export default function AIAgentPanel() {
         toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
       }
     } catch (err: unknown) {
-      // Even if the browser loses connection, the edge function continues server-side
-      // The polling will pick up the results
       if (autoMake) {
         setDiscovering(false);
         toast({ title: "Pipeline Started", description: "Running in background. You can close this page and check back later." });
@@ -408,7 +358,7 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Fire-and-forget batch: tell server to start processing the manual queue
+  // Fire-and-forget batch
   const startServerBatch = async () => {
     setBatchRunning(true);
     try {
@@ -425,7 +375,6 @@ export default function AIAgentPanel() {
   };
 
   const handleStopBatch = async () => {
-    // Mark all pending manual queue items as "skipped" to stop the chain
     await supabase.from("nightly_builder_queue")
       .update({ status: "skipped", error_message: "Stopped by user" })
       .eq("status", "pending")
@@ -435,7 +384,6 @@ export default function AIAgentPanel() {
     toast({ title: "Batch Stopped", description: "Remaining items have been skipped." });
   };
 
-  // Batch generate (manual trigger)
   const handleBatchGenerate = async () => {
     if (batchQueue.length === 0) {
       toast({ title: "Error", description: "Add topics to the batch queue first.", variant: "destructive" });
@@ -444,29 +392,10 @@ export default function AIAgentPanel() {
     await startServerBatch();
   };
 
-  // Save automation settings
-  const saveAutoSettings = async (updates: Partial<AutoSettings>) => {
-    setSavingSettings(true);
-    try {
-      if (autoSettings) {
-        await supabase.from("auto_generation_settings").update(updates).eq("id", autoSettings.id);
-      } else {
-        await supabase.from("auto_generation_settings").insert(updates);
-      }
-      await fetchAutoSettings();
-      toast({ title: "Settings Saved", description: "Automation settings updated." });
-    } catch (err) {
-      console.error("Save settings error:", err);
-      toast({ title: "Error", description: "Failed to save settings.", variant: "destructive" });
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
   const addToQueue = async (topic: DiscoveredTopic) => {
     if (!batchQueue.find(t => t.topic === topic.topic)) {
       setBatchQueue(prev => [...prev, topic]);
-      // Persist to DB
+      // Persist to DB — Bug 8 fix: explicitly set run_date and batch_number to null
       await supabase.from("nightly_builder_queue").insert({
         topic: topic.topic,
         category_id: topic.category_id || null,
@@ -480,7 +409,6 @@ export default function AIAgentPanel() {
 
   const removeFromQueue = async (topicText: string) => {
     setBatchQueue(prev => prev.filter(t => t.topic !== topicText));
-    // Remove from DB
     await supabase.from("nightly_builder_queue")
       .delete()
       .eq("topic", topicText)
@@ -508,8 +436,9 @@ export default function AIAgentPanel() {
         </div>
       </div>
 
+      {/* Bug 5+10 fix: Removed dead "Automation" tab — no backend uses auto_generation_settings */}
       <Tabs defaultValue="generate" className="w-full">
-        <TabsList className="grid grid-cols-6 w-full">
+        <TabsList className="grid grid-cols-5 w-full">
           <TabsTrigger value="generate" className="flex items-center gap-1.5 text-xs sm:text-sm">
             <Sparkles className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Generate</span>
@@ -521,10 +450,6 @@ export default function AIAgentPanel() {
           <TabsTrigger value="batch" className="flex items-center gap-1.5 text-xs sm:text-sm">
             <Rocket className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Batch</span>
-          </TabsTrigger>
-          <TabsTrigger value="automation" className="flex items-center gap-1.5 text-xs sm:text-sm">
-            <CalendarClock className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Automation</span>
           </TabsTrigger>
           <TabsTrigger value="nightly" className="flex items-center gap-1.5 text-xs sm:text-sm">
             <Moon className="h-3.5 w-3.5" />
@@ -693,7 +618,6 @@ export default function AIAgentPanel() {
                         <button
                           onClick={async () => {
                             setDiscoveredTopics([]);
-                            // Also clear from DB so they don't reappear on refresh
                             const { data: latestRun } = await supabase
                               .from("discover_runs")
                               .select("id")
@@ -834,140 +758,6 @@ export default function AIAgentPanel() {
               </div>
             </TabsContent>
 
-            {/* Automation Tab */}
-            <TabsContent value="automation" className="mt-0">
-              <div className="bg-card border border-border rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <CalendarClock className="h-5 w-5 text-primary" />
-                  <h3 className="font-semibold text-foreground">Autonomous Mode</h3>
-                </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  The AI will automatically discover topics and generate articles on a schedule. All articles are saved as drafts — nothing goes live without your approval.
-                </p>
-
-                <div className="space-y-5">
-                  {/* Enable/Disable Toggle */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Enable Automation</p>
-                      <p className="text-xs text-muted-foreground">Run the AI agent automatically on a schedule</p>
-                    </div>
-                    <Switch
-                      checked={autoSettings?.enabled || false}
-                      onCheckedChange={(checked) => saveAutoSettings({ enabled: checked })}
-                      disabled={savingSettings}
-                    />
-                  </div>
-
-                  {/* Frequency */}
-                  <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">Frequency</label>
-                    <select
-                      value={autoSettings?.frequency || "daily"}
-                      onChange={(e) => saveAutoSettings({ frequency: e.target.value })}
-                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm outline-none"
-                      disabled={savingSettings}
-                    >
-                      {FREQUENCY_OPTIONS.map(opt => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Articles per run */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-sm font-medium text-foreground">Articles per run</label>
-                      <span className="text-sm font-mono text-primary">{autoSettings?.articles_per_run || 3}</span>
-                    </div>
-                    <Slider
-                      value={[autoSettings?.articles_per_run || 3]}
-                      onValueChange={([val]) => saveAutoSettings({ articles_per_run: val })}
-                      min={1}
-                      max={5}
-                      step={1}
-                      disabled={savingSettings}
-                    />
-                    <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
-                      <span>1</span>
-                      <span>5</span>
-                    </div>
-                  </div>
-
-                  {/* Target Categories */}
-                  <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">Target Categories</label>
-                    <div className="flex flex-wrap gap-2">
-                      {categories.map(cat => {
-                        const isSelected = autoTargetCats.includes(cat.id);
-                        return (
-                          <button
-                            key={cat.id}
-                            onClick={() => {
-                              const next = isSelected
-                                ? autoTargetCats.filter(id => id !== cat.id)
-                                : [...autoTargetCats, cat.id];
-                              setAutoTargetCats(next);
-                              saveAutoSettings({ target_categories: next as unknown as string[] });
-                            }}
-                            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                              isSelected
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted text-muted-foreground hover:bg-muted/80"
-                            }`}
-                            disabled={savingSettings}
-                          >
-                            {cat.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-1">Leave empty to cover all categories</p>
-                  </div>
-
-                  {/* Status Info */}
-                  {autoSettings && (
-                    <div className="p-3 rounded-lg bg-muted/50 border border-border space-y-2">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-muted-foreground">Status</span>
-                        <span className={`font-medium ${autoSettings.enabled ? "text-emerald-600" : "text-muted-foreground"}`}>
-                          {autoSettings.enabled ? "● Active" : "○ Disabled"}
-                        </span>
-                      </div>
-                      {autoSettings.last_run_at && (
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-muted-foreground">Last run</span>
-                          <span className="text-foreground">
-                            {new Date(autoSettings.last_run_at).toLocaleString()}
-                          </span>
-                        </div>
-                      )}
-                      {autoSettings.next_run_at && autoSettings.enabled && (
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-muted-foreground">Next run</span>
-                          <span className="text-foreground">
-                            {new Date(autoSettings.next_run_at).toLocaleString()}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Emergency Stop */}
-                  {autoSettings?.enabled && (
-                    <button
-                      onClick={() => saveAutoSettings({ enabled: false })}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-destructive text-destructive-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
-                      disabled={savingSettings}
-                    >
-                      <StopCircle className="h-4 w-4" />
-                      Emergency Stop
-                    </button>
-                  )}
-                </div>
-              </div>
-            </TabsContent>
-
             {/* Nightly Builder Tab */}
             <TabsContent value="nightly" className="mt-0">
               <NightlyBuilderTab />
@@ -1087,159 +877,90 @@ export default function AIAgentPanel() {
                         </span>
                       </div>
                     )}
-                    <span className="text-xs text-muted-foreground">
-                      {selectedRun.completed_at && `${new Date(selectedRun.completed_at).toLocaleTimeString()}`}
-                    </span>
                   </div>
                 )}
 
+                {/* Error */}
                 {selectedRun.error_message && (
                   <div className="mt-3 p-3 rounded-lg bg-destructive/10 text-destructive text-xs">
                     {selectedRun.error_message}
                   </div>
                 )}
-
-                {/* Retry button for skipped runs */}
-                {selectedRun.status === "skipped" && !runs.some(r => r.topic === selectedRun.topic && (r.status === "completed" || r.mode === "retry")) && (
-                  <button
-                    onClick={async () => {
-                      setGenerating(true);
-                      try {
-                        const { data, error } = await supabase.functions.invoke("ai-agent", {
-                          body: { topic: selectedRun.topic, mode: "retry", skipDuplicateCheck: true },
-                        });
-                        if (error) throw error;
-                        if (data?.error) throw new Error(data.error);
-                        toast({ title: "Article Generated!", description: `"${data.title}" saved as draft.` });
-                        setPollingRunId(data._run_id);
-                        refetchArticles();
-                        fetchRuns();
-                      } catch (err: unknown) {
-                        const msg = err instanceof Error ? err.message : "Retry failed";
-                        toast({ title: "Error", description: msg, variant: "destructive" });
-                      } finally {
-                        setGenerating(false);
-                      }
-                    }}
-                    disabled={isAnyOperationRunning}
-                    className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-                  >
-                    {generating ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Generating (skip dup check)...
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        Force Generate (Skip Duplicate Check)
-                      </>
-                    )}
-                  </button>
-                )}
               </div>
             )}
 
-            {/* Recent Pipeline Runs */}
+            {/* Recent Runs */}
             <div className="bg-card border border-border rounded-xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-foreground">Pipeline History</h3>
-                <button onClick={() => fetchRuns()} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-foreground text-sm">Pipeline Activity</h3>
+                <button
+                  onClick={() => fetchRuns()}
+                  className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors"
+                >
                   <RefreshCw className="h-4 w-4" />
                 </button>
               </div>
-
-              {runs.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Bot className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">No pipeline runs yet. Generate your first article!</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {runs.map((run) => (
-                    <button
-                      key={run.id}
-                      onClick={() => setSelectedRun(run)}
-                      className={`w-full text-left p-3 rounded-lg border transition-all hover:border-primary/30 ${
-                        selectedRun?.id === run.id ? "border-primary bg-primary/5" : "border-border bg-muted/30"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-foreground truncate max-w-[65%]">{run.topic}</p>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${STATUS_COLORS[run.status] || STATUS_COLORS.pending}`}>
-                          {run.status}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-3 mt-1.5">
-                        <span className="text-[10px] text-muted-foreground">
-                          {new Date(run.started_at).toLocaleString()}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground">
-                          Step {run.current_step}/{run.total_steps}
-                        </span>
-                        {run.mode !== "manual" && (
-                          <span className="text-[10px] text-primary font-medium">{run.mode}</span>
-                        )}
-                        {run.status === "completed" && (
-                          <Eye className="h-3 w-3 text-muted-foreground ml-auto" />
-                        )}
-                        {run.status === "skipped" && !runs.some(r => r.topic === run.topic && (r.status === "completed" || r.mode === "retry")) && (
-                          <span
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              setGenerating(true);
-                              try {
-                                const { data, error } = await supabase.functions.invoke("ai-agent", {
-                                  body: { topic: run.topic, mode: "retry", skipDuplicateCheck: true },
-                                });
-                                if (error) throw error;
-                                if (data?.error) throw new Error(data.error);
-                                toast({ title: "Article Generated!", description: `"${data.title}" saved as draft.` });
-                                setPollingRunId(data._run_id);
-                                refetchArticles();
-                                fetchRuns();
-                              } catch (err: unknown) {
-                                const msg = err instanceof Error ? err.message : "Retry failed";
-                                toast({ title: "Error", description: msg, variant: "destructive" });
-                              } finally {
-                                setGenerating(false);
-                              }
-                            }}
-                            className="ml-auto text-[10px] text-primary font-medium hover:underline cursor-pointer"
-                          >
-                            Force Generate →
+              <div className="space-y-2">
+                {runs.length === 0 ? (
+                  <div className="text-center py-6">
+                    <Clock className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-sm text-muted-foreground">No pipeline runs yet.</p>
+                  </div>
+                ) : (
+                  <>
+                    {runs.map((run) => (
+                      <button
+                        key={run.id}
+                        onClick={() => {
+                          setSelectedRun(run);
+                          if (run.status !== "completed" && run.status !== "failed" && run.status !== "skipped") {
+                            setPollingRunId(run.id);
+                          }
+                        }}
+                        className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                          selectedRun?.id === run.id
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:bg-muted/50"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-foreground truncate max-w-[70%]">{run.topic}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${STATUS_COLORS[run.status] || STATUS_COLORS.pending}`}>
+                            {run.status}
                           </span>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                  {hasMoreRuns && (
-                    <button
-                      onClick={async () => {
-                        setLoadingMore(true);
-                        const newLimit = runsLimit + 10;
-                        setRunsLimit(newLimit);
-                        await fetchRuns(newLimit);
-                        setLoadingMore(false);
-                      }}
-                      disabled={loadingMore}
-                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
-                    >
-                      {loadingMore ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          Loading...
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          Load More
-                        </>
-                      )}
-                    </button>
-                  )}
-                </div>
-              )}
+                        </div>
+                        <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                          <span>{run.mode}</span>
+                          <span>·</span>
+                          <span>{new Date(run.started_at).toLocaleString()}</span>
+                          {run.completed_at && (
+                            <>
+                              <span>·</span>
+                              <span>{Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s</span>
+                            </>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+
+                    {hasMoreRuns && (
+                      <button
+                        onClick={async () => {
+                          setLoadingMore(true);
+                          const newLimit = runsLimit + 10;
+                          setRunsLimit(newLimit);
+                          await fetchRuns(newLimit);
+                          setLoadingMore(false);
+                        }}
+                        disabled={loadingMore}
+                        className="w-full text-center py-2 text-xs text-primary hover:underline disabled:opacity-50"
+                      >
+                        {loadingMore ? "Loading..." : "Load more runs"}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           </div>
         </div>

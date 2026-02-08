@@ -567,6 +567,7 @@ export type Database = {
           total_after_dedup: number | null
           total_categories_processed: number | null
           total_topics_found: number | null
+          updated_at: string | null
         }
         Insert: {
           articles_failed?: number | null
@@ -584,6 +585,7 @@ export type Database = {
           total_after_dedup?: number | null
           total_categories_processed?: number | null
           total_topics_found?: number | null
+          updated_at?: string | null
         }
         Update: {
           articles_failed?: number | null
@@ -601,6 +603,7 @@ export type Database = {
           total_after_dedup?: number | null
           total_categories_processed?: number | null
           total_topics_found?: number | null
+          updated_at?: string | null
         }
         Relationships: []
       }
@@ -711,6 +714,10 @@ export type Database = {
           _user_id: string
         }
         Returns: boolean
+      }
+      increment_nightly_counter: {
+        Args: { _column: string; _run_id: string }
+        Returns: undefined
       }
       increment_view_count: { Args: { _slug: string }; Returns: undefined }
       search_articles: {

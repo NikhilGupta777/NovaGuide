@@ -54,6 +54,14 @@ const RUN_STATUS_COLORS: Record<string, string> = {
   stopped: "text-orange-600 bg-orange-50 dark:text-orange-400 dark:bg-orange-950",
 };
 
+// Helper: get IST date string matching the edge function logic
+function getISTDateString(): string {
+  const now = new Date();
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istDate = new Date(now.getTime() + istOffsetMs);
+  return istDate.toISOString().split("T")[0];
+}
+
 export default function NightlyBuilderTab() {
   const { toast } = useToast();
   const [settings, setSettings] = useState<NightlySettings | null>(null);
@@ -96,7 +104,8 @@ export default function NightlyBuilderTab() {
   }, []);
 
   const fetchQueueStats = useCallback(async () => {
-    const today = new Date().toISOString().split("T")[0];
+    // Bug 1 fix: use IST date to match the edge function's queue dates
+    const today = getISTDateString();
 
     const [b1, b2, b3, completed] = await Promise.all([
       supabase.from("nightly_builder_queue").select("*", { count: "exact", head: true }).eq("run_date", today).eq("batch_number", 1).eq("status", "pending"),
@@ -113,7 +122,7 @@ export default function NightlyBuilderTab() {
     });
   }, []);
 
-  // Cleanup stale runs (stuck > 10 min) and initial load
+  // Cleanup stale runs and initial load
   useEffect(() => {
     const init = async () => {
       await fetchSettings();
@@ -128,12 +137,15 @@ export default function NightlyBuilderTab() {
         .in("status", ["researching", "generating", "pending"])
         .lt("started_at", sixHoursAgo);
 
-      // Recover stuck "processing" manual queue items on load
+      // Bug 9 fix: Only recover manual queue items stuck in "processing" for >15 minutes
+      // This prevents interfering with actively running batches on page refresh
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       await supabase
         .from("nightly_builder_queue")
         .update({ status: "pending" })
         .eq("status", "processing")
-        .is("run_date", null);
+        .is("run_date", null)
+        .lt("created_at", fifteenMinAgo);
 
       // Re-fetch after cleanup
       await fetchRuns();
@@ -160,7 +172,6 @@ export default function NightlyBuilderTab() {
       if (settings) {
         await supabase.from("nightly_builder_settings").update(updates).eq("id", settings.id);
       } else {
-        // Create initial settings row
         await supabase.from("nightly_builder_settings").insert({
           enabled: false,
           topics_per_category: 50,
@@ -188,15 +199,21 @@ export default function NightlyBuilderTab() {
     }, 500);
   };
 
+  // Bug 2 fix: pass manual=true so edge function bypasses enabled check
   const handleRunNow = async (batch = 1) => {
     setTriggering(true);
     try {
       // Fire-and-forget: don't await the full response since it runs in background
       supabase.functions.invoke("ai-nightly-builder", {
-        body: { batch },
+        body: { batch, manual: true },
       }).then(({ data, error }) => {
         if (error || data?.error) {
-          console.error("Nightly builder background error:", error || data?.error);
+          const errMsg = data?.error || (error instanceof Error ? error.message : "Unknown error");
+          console.error("Nightly builder background error:", errMsg);
+          // Bug 2: show error to user if builder is disabled
+          if (data?.disabled) {
+            toast({ title: "Builder Disabled", description: errMsg, variant: "destructive" });
+          }
         }
       }).catch(err => console.error("Nightly builder invoke error:", err));
 

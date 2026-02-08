@@ -25,7 +25,18 @@ function serviceClient() {
   );
 }
 
+// ── Helper: Get IST date string (UTC+5:30) ───────────────────────
+// All batches use IST date so batch 1 (18:30 UTC) and batch 2 (06:30 UTC next day)
+// agree on the same "day" (Bug 1 fix)
+function getISTDateString(): string {
+  const now = new Date();
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istDate = new Date(now.getTime() + istOffsetMs);
+  return istDate.toISOString().split("T")[0];
+}
+
 // ── Self-Chaining: fire-and-forget call to ourselves ─────────────
+// Bug 4 fix: consume response body to avoid resource leaks
 function selfInvoke(body: Record<string, unknown>) {
   const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ai-nightly-builder`;
   fetch(url, {
@@ -35,7 +46,9 @@ function selfInvoke(body: Record<string, unknown>) {
       "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
     },
     body: JSON.stringify(body),
-  }).catch(err => console.error("Self-invoke failed:", err));
+  })
+    .then(r => r.text()) // consume response body to prevent resource leaks
+    .catch(err => console.error("Self-invoke failed:", err));
 }
 
 function jsonResp(data: unknown, status = 200) {
@@ -75,8 +88,6 @@ function calculateNextRunAt(): string {
 }
 
 // ── Deep Research via Gemini Flash + Google Search Grounding ──────
-// Using the standard generateContent API with google_search tool
-// (more reliable than the Interactions API which may not be available)
 
 async function deepResearchCategory(
   apiKey: string,
@@ -111,7 +122,6 @@ IMPORTANT: Do NOT include any topics that are too similar to the existing articl
 Return ONLY a valid JSON array of strings with ${topicsCount} unique, specific questions/topics. Each should be a clear, searchable question or how-to title.
 Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
 
-  // Use Gemini Flash with Google Search grounding for real web data
   const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${apiKey}`;
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -243,7 +253,7 @@ async function ensureSettings(db: ReturnType<typeof serviceClient>) {
 
 // ── Main Orchestrator ─────────────────────────────────────────────
 
-async function runNightlyBuilder(batch: number) {
+async function runNightlyBuilder(batch: number, isManualRun = false) {
   const db = serviceClient();
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
@@ -252,11 +262,8 @@ async function runNightlyBuilder(batch: number) {
   const settings = await ensureSettings(db);
   if (!settings) throw new Error("Failed to get/create nightly builder settings");
 
-  // Check if enabled
-  if (!settings.enabled) {
-    console.log("Nightly builder is disabled. Skipping.");
-    return;
-  }
+  // Bug 2 fix: enabled check is now done BEFORE EdgeRuntime.waitUntil in handler
+  // Manual runs bypass enabled check (handled in HTTP handler)
 
   // Check stop requested
   if (settings.stop_requested) {
@@ -553,8 +560,8 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
     });
   }
 
-  // Insert all into queue
-  const today = new Date().toISOString().split("T")[0];
+  // Insert all into queue — use IST date so overflow batches can find them (Bug 1 fix)
+  const today = getISTDateString();
   const queueInserts = [
     ...batch1Items.map(t => ({ run_date: today, batch_number: 1, topic: t.topic, category_id: t.category_id, priority: t.priority, status: "pending" })),
     ...batch2Items.map(t => ({ run_date: today, batch_number: 2, topic: t.topic, category_id: t.category_id, priority: t.priority, status: "pending" })),
@@ -596,7 +603,8 @@ async function runOverflowBatch(
   runId: string,
   batch: number
 ) {
-  const today = new Date().toISOString().split("T")[0];
+  // Bug 1 fix: use IST date so overflow batches match batch 1's run_date
+  const today = getISTDateString();
 
   const { count } = await db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
@@ -639,23 +647,27 @@ async function generateOneFromQueue(
   // Check stop flag
   if (settings.stop_requested) {
     console.log("Stop requested. Halting generation.");
+    // Bug 6 fix: atomic completion — only update if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "stopped",
       completed_at: new Date().toISOString(),
-    }).eq("id", runId);
+    }).eq("id", runId).eq("status", "generating");
     await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
     return;
   }
 
   // Recover stale "processing" nightly items from crashed chains
+  // Bug 9 fix: only recover items stuck for >15 minutes
+  const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
     .eq("status", "processing")
     .eq("run_date", runDate)
-    .eq("batch_number", batch);
+    .eq("batch_number", batch)
+    .lt("created_at", fifteenMinAgo);
 
   if (staleItems && staleItems.length > 0) {
-    console.log(`Recovering ${staleItems.length} stale nightly items...`);
+    console.log(`Recovering ${staleItems.length} stale nightly items (>15min old)...`);
     for (const si of staleItems) {
       const searchTerm = si.topic.substring(0, 40).replace(/[%_]/g, "");
       const { data: existing } = await db.from("articles")
@@ -679,10 +691,21 @@ async function generateOneFromQueue(
 
   if (!queueItems || queueItems.length === 0) {
     console.log("No pending queue items. Completing run.");
+    // Bug 6 fix: atomic completion — only mark as completed if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
-    }).eq("id", runId);
+    }).eq("id", runId).eq("status", "generating");
+
+    // Calculate and set next_run_at (only place it's set now — Bug 7 fix)
+    try {
+      const nextRun = calculateNextRunAt();
+      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
+    } catch (e) {
+      console.error("Failed to set next_run_at:", e);
+    }
+
+    console.log(`Batch ${batch} complete.`);
     return;
   }
 
@@ -742,10 +765,8 @@ async function generateOneFromQueue(
         article_id: articleId || null,
       }).eq("id", item.id);
 
-      // Update run progress
-      const { data: currentRun } = await db.from("nightly_builder_runs").select("articles_generated, articles_published").eq("id", runId).single();
-      const gen = (currentRun?.articles_generated || 0) + 1;
-      let pub = currentRun?.articles_published || 0;
+      // Bug 3 fix: use atomic increment via RPC instead of read-then-write
+      await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_generated" });
 
       const qualityScore = agentData._quality_score || 0;
       const factualScore = agentData._factual_score || 0;
@@ -755,14 +776,9 @@ async function generateOneFromQueue(
           status: "published",
           published_at: new Date().toISOString(),
         }).eq("id", articleId);
-        pub++;
+        await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_published" });
         console.log(`Auto-published: "${item.topic}"`);
       }
-
-      await db.from("nightly_builder_runs").update({
-        articles_generated: gen,
-        articles_published: pub,
-      }).eq("id", runId);
     }
   } catch (err) {
     console.error(`Failed to generate "${item.topic}":`, err);
@@ -771,10 +787,8 @@ async function generateOneFromQueue(
       error_message: err instanceof Error ? err.message : String(err),
     }).eq("id", item.id);
 
-    const { data: currentRun } = await db.from("nightly_builder_runs").select("articles_failed").eq("id", runId).single();
-    await db.from("nightly_builder_runs").update({
-      articles_failed: (currentRun?.articles_failed || 0) + 1,
-    }).eq("id", runId);
+    // Bug 3 fix: atomic increment for failed counter
+    await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_failed" });
   }
 
   // Self-chain: check if there are more items (include processing for stale recovery)
@@ -788,10 +802,11 @@ async function generateOneFromQueue(
     console.log(`Self-invoking for next article (${remaining} remaining/recoverable)...`);
     selfInvoke({ action: "generate_one", runId, batch, runDate });
   } else {
+    // Bug 6 fix: atomic completion — only mark completed if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
-    }).eq("id", runId);
+    }).eq("id", runId).eq("status", "generating");
 
     // Calculate and set next_run_at
     try {
@@ -806,24 +821,22 @@ async function generateOneFromQueue(
 }
 
 // ── Recover stale "processing" items ─────────────────────────────
-// Items stuck in "processing" from a previous chain that died (function timeout, crash, etc.)
-// We check if ai-agent actually finished creating an article for the topic.
 
 async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
-  // Get ALL "processing" manual batch items
+  // Bug 9 fix: Only recover items stuck in "processing" for >15 minutes
+  const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
     .eq("status", "processing")
-    .is("run_date", null);
+    .is("run_date", null)
+    .lt("created_at", fifteenMinAgo);
 
   if (!staleItems || staleItems.length === 0) return 0;
 
-  console.log(`Found ${staleItems.length} items stuck in "processing" — recovering...`);
+  console.log(`Found ${staleItems.length} items stuck in "processing" for >15min — recovering...`);
   let recovered = 0;
 
   for (const item of staleItems) {
-    // Check if ai-agent actually created an article for this topic
-    // Use a fuzzy match on the first 40 chars of the topic
     const searchTerm = item.topic.substring(0, 40).replace(/[%_]/g, "");
     const { data: existingArticle } = await db.from("articles")
       .select("id")
@@ -831,14 +844,12 @@ async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
       .limit(1);
 
     if (existingArticle && existingArticle.length > 0) {
-      // Article exists — ai-agent finished even though we timed out
       await db.from("nightly_builder_queue").update({
         status: "completed",
         article_id: existingArticle[0].id,
       }).eq("id", item.id);
       console.log(`Recovered "${item.topic}" — article already exists (${existingArticle[0].id})`);
     } else {
-      // No article — reset to pending for retry
       await db.from("nightly_builder_queue").update({
         status: "pending",
       }).eq("id", item.id);
@@ -876,15 +887,14 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Step 3: Atomically claim the item (prevents double-processing by parallel chains)
+  // Step 3: Atomically claim the item
   const { data: claimed } = await db.from("nightly_builder_queue")
     .update({ status: "processing" })
     .eq("id", item.id)
-    .eq("status", "pending")  // Only claim if still pending
+    .eq("status", "pending")
     .select();
 
   if (!claimed || claimed.length === 0) {
-    // Another chain already claimed this item — skip and try next
     console.log(`Item "${item.topic}" already claimed by another chain, trying next...`);
     selfInvoke({ action: "generate_manual_batch", autoPublish });
     return;
@@ -955,7 +965,7 @@ function selfChainManualBatch(autoPublish: boolean) {
   const db = serviceClient();
   db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
-    .in("status", ["pending", "processing"])  // Include processing — they may be stale and will be recovered
+    .in("status", ["pending", "processing"])
     .is("run_date", null)
     .then(({ count }) => {
       if (count && count > 0) {
@@ -1014,7 +1024,7 @@ serve(async (req) => {
     // Self-chain action: generate one article from nightly queue
     if (body.action === "generate_one" && body.runId) {
       console.log(`Self-chained: generating one article for run ${body.runId}, batch ${body.batch}`);
-      await generateOneFromQueue(body.runId, body.batch || 1, body.runDate || new Date().toISOString().split("T")[0]);
+      await generateOneFromQueue(body.runId, body.batch || 1, body.runDate || getISTDateString());
       return jsonResp({ success: true });
     }
 
@@ -1027,7 +1037,6 @@ serve(async (req) => {
 
     // Start manual batch processing (from AIAgentPanel or auto-discover)
     if (body.action === "start_manual_batch") {
-      // Check if there are any pending manual items to process
       const checkDb = serviceClient();
       const { count: pendingCount } = await checkDb.from("nightly_builder_queue")
         .select("*", { count: "exact", head: true })
@@ -1039,13 +1048,9 @@ serve(async (req) => {
         return jsonResp({ success: true, message: "No items to process" });
       }
 
-      // Launch parallel chains for faster processing
-      // Each chain independently picks up and claims the next pending item
-      // Atomic claiming prevents double-processing
-      const parallelism = Math.min(body.parallelism || 3, pendingCount, 5); // max 5 chains
+      const parallelism = Math.min(body.parallelism || 3, pendingCount, 5);
       console.log(`Starting manual batch generation (${pendingCount} items, ${parallelism} parallel chains)...`);
       
-      // Fire all chains immediately — atomic DB claiming handles contention
       for (let i = 0; i < parallelism; i++) {
         selfInvoke({ action: "generate_manual_batch", autoPublish: body.autoPublish || false, chainId: i });
       }
@@ -1055,21 +1060,25 @@ serve(async (req) => {
 
     // Default: start nightly builder run
     const batch = body.batch || 1;
-    console.log(`Nightly Builder triggered for batch ${batch}`);
+    const isManualRun = !!body.manual; // frontend sets manual=true for "Run Now"
+    console.log(`Nightly Builder triggered for batch ${batch} (manual: ${isManualRun})`);
 
-    // Fire-and-forget: run research phase in background so response returns immediately
+    // Bug 2 fix: Check enabled BEFORE firing background task
+    // Manual runs bypass the enabled check
+    if (!isManualRun) {
+      const db = serviceClient();
+      const settings = await ensureSettings(db);
+      if (settings && !settings.enabled) {
+        console.log("Nightly builder is disabled and this is not a manual run. Skipping.");
+        return jsonResp({ error: "Nightly builder is disabled. Enable it in settings or use manual run.", disabled: true }, 400);
+      }
+    }
+
+    // Fire-and-forget: run in background so response returns immediately
     EdgeRuntime.waitUntil(
-      runNightlyBuilder(batch)
-        .then(async () => {
-          // Update next_run_at after successful run
-          try {
-            const db = serviceClient();
-            const nextRun = calculateNextRunAt();
-            await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
-          } catch (e) {
-            console.error("Failed to update next_run_at:", e);
-          }
-        })
+      runNightlyBuilder(batch, isManualRun)
+        // Bug 7 fix: removed duplicate next_run_at update from here
+        // next_run_at is only set when generation actually completes (in generateOneFromQueue)
         .catch(e => console.error("Nightly builder execution error:", e))
     );
 
