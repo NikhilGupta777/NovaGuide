@@ -12,18 +12,15 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 // ── Optimal Model Strategy ────────────────────────────────────────────
 // Each model is chosen for its specific strength in the pipeline
 const MODEL_LITE = "gemini-2.5-flash-lite"; // Cheapest: simple tasks (dup check)
-const MODEL_RESEARCH = "gemini-2.5-flash";   // Stable grounding: research & fact-check
+const MODEL_RESEARCH = "gemini-2.5-flash"; // Stable grounding: research & fact-check
 const MODEL_FAST = "gemini-3-flash-preview"; // Smart + fast: outline, quality gate
-const MODEL_PRO = "gemini-3-pro-preview";    // Best quality: article writing
+const MODEL_PRO = "gemini-3-pro-preview"; // Best quality: article writing
 const MODEL_PRO_FALLBACK = "gemini-3-flash-preview"; // Fallback if Pro hits 429
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function serviceClient() {
-  return createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 }
 
 async function authenticateAdmin(req: Request) {
@@ -38,12 +35,13 @@ async function authenticateAdmin(req: Request) {
     return { user: null, db: serviceClient() };
   }
 
-  const userClient = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } }
-  );
-  const { data: { user }, error } = await userClient.auth.getUser();
+  const userClient = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const {
+    data: { user },
+    error,
+  } = await userClient.auth.getUser();
   if (error || !user) throw { status: 401, message: "Unauthorized" };
 
   const db = serviceClient();
@@ -63,7 +61,7 @@ async function callGemini(
   model: string,
   contents: unknown[],
   tools?: unknown[],
-  systemInstruction?: string
+  systemInstruction?: string,
 ) {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
@@ -98,7 +96,7 @@ async function callGeminiWithFallback(
   fallbackModel: string,
   contents: unknown[],
   tools?: unknown[],
-  systemInstruction?: string
+  systemInstruction?: string,
 ) {
   try {
     return await callGemini(apiKey, primaryModel, contents, tools, systemInstruction);
@@ -116,7 +114,7 @@ async function callGeminiWithFallback(
 function extractText(response: Record<string, unknown>): string {
   const candidates = response.candidates as { content: { parts: { text?: string }[] } }[];
   if (!candidates?.[0]?.content?.parts) return "";
-  return candidates[0].content.parts.map(p => p.text || "").join("");
+  return candidates[0].content.parts.map((p) => p.text || "").join("");
 }
 
 function extractGroundingSources(response: Record<string, unknown>): { title: string; url: string }[] {
@@ -130,12 +128,14 @@ function extractGroundingSources(response: Record<string, unknown>): { title: st
 
   const seen = new Set<string>();
   return chunks
-    .filter(c => c.web?.uri && !seen.has(c.web.uri) && seen.add(c.web.uri))
-    .map(c => ({ title: c.web!.title || "", url: c.web!.uri }));
+    .filter((c) => c.web?.uri && !seen.has(c.web.uri) && seen.add(c.web.uri))
+    .map((c) => ({ title: c.web!.title || "", url: c.web!.uri }));
 }
 
 function extractFunctionCall(response: Record<string, unknown>): Record<string, unknown> | null {
-  const candidates = response.candidates as { content: { parts: { functionCall?: { name: string; args: Record<string, unknown> } }[] } }[];
+  const candidates = response.candidates as {
+    content: { parts: { functionCall?: { name: string; args: Record<string, unknown> } }[] };
+  }[];
   if (!candidates?.[0]?.content?.parts) return null;
   for (const part of candidates[0].content.parts) {
     if (part.functionCall) return part.functionCall.args;
@@ -148,9 +148,12 @@ async function updateRunStatus(
   runId: string,
   status: string,
   step: number,
-  extra: Record<string, unknown> = {}
+  extra: Record<string, unknown> = {},
 ) {
-  await db.from("agent_runs").update({ status, current_step: step, ...extra }).eq("id", runId);
+  await db
+    .from("agent_runs")
+    .update({ status, current_step: step, ...extra })
+    .eq("id", runId);
 }
 
 function jsonResp(data: unknown, status = 200) {
@@ -161,7 +164,7 @@ function jsonResp(data: unknown, status = 200) {
 }
 
 function delay(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Pipeline Steps ──────────────────────────────────────────────────
@@ -170,7 +173,7 @@ function delay(ms: number) {
 async function step1_duplicateCheck(
   apiKey: string,
   topic: string,
-  existingTitles: string[]
+  existingTitles: string[],
 ): Promise<{ isDuplicate: boolean; similarTitle?: string; score?: number }> {
   console.log("Pipeline Step 1: Duplicate Check (Flash Lite) for:", topic);
 
@@ -183,7 +186,7 @@ YOUR JOB: Only flag TRUE duplicates — articles that are essentially the SAME a
 CRITICAL RULES:
 - Different titles that serve different user search queries = ALWAYS allow. Users search different phrases and each title captures different traffic.
 - Two or three articles on a similar broad topic but written differently, with different titles, different structure, or slightly different focus = NOT duplicates. These are VALUABLE because they serve different readers.
-- The ONLY duplicate is when the title is nearly word-for-word identical AND the step-by-step content would be 95%+ the same instructions in the same order.
+- The ONLY duplicate is when the title is nearly word-for-word identical AND the step-by-step content would be 90%+ the same instructions in the same order.
 - "Slow internet fixes" vs "Internet not working troubleshooting" → NOT duplicate (different problems)
 - "Clear Chrome cache" vs "Clear browser cache" → NOT duplicate (different scope, different search intent)
 - "How to fix Wi-Fi" vs "How to Fix Wi-Fi" → DUPLICATE (same title, same content)
@@ -199,26 +202,46 @@ ${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
 Is there an existing article with a nearly IDENTICAL title AND identical step-by-step content? Only flag as duplicate if it's essentially the same article rewritten word-for-word. Different titles, different angles, or different wording = NOT a duplicate.`;
 
-  const response = await callGemini(apiKey, MODEL_LITE, [
-    { role: "user", parts: [{ text: prompt }] }
-  ], [
-    {
-      function_declarations: [{
-        name: "check_duplicate",
-        description: "Return duplicate check results",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            is_duplicate: { type: "BOOLEAN", description: "True ONLY if an existing article has a nearly identical title AND 95%+ identical step-by-step content" },
-            similarity_score: { type: "NUMBER", description: "Content overlap score 0-100. Only 95+ means true duplicate. Different titles automatically cap this at 80." },
-            similar_to: { type: "STRING", description: "Title of the most similar existing article, or empty string" },
-            reasoning: { type: "STRING", description: "Brief explanation of WHY content would or would not overlap" }
+  const response = await callGemini(
+    apiKey,
+    MODEL_LITE,
+    [{ role: "user", parts: [{ text: prompt }] }],
+    [
+      {
+        function_declarations: [
+          {
+            name: "check_duplicate",
+            description: "Return duplicate check results",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                is_duplicate: {
+                  type: "BOOLEAN",
+                  description:
+                    "True ONLY if an existing article has a nearly identical title AND 95%+ identical step-by-step content",
+                },
+                similarity_score: {
+                  type: "NUMBER",
+                  description:
+                    "Content overlap score 0-100. Only 95+ means true duplicate. Different titles automatically cap this at 80.",
+                },
+                similar_to: {
+                  type: "STRING",
+                  description: "Title of the most similar existing article, or empty string",
+                },
+                reasoning: {
+                  type: "STRING",
+                  description: "Brief explanation of WHY content would or would not overlap",
+                },
+              },
+              required: ["is_duplicate", "similarity_score", "similar_to", "reasoning"],
+            },
           },
-          required: ["is_duplicate", "similarity_score", "similar_to", "reasoning"]
-        }
-      }]
-    }
-  ], systemPrompt);
+        ],
+      },
+    ],
+    systemPrompt,
+  );
 
   const args = extractFunctionCall(response);
   if (!args) return { isDuplicate: false };
@@ -226,14 +249,14 @@ Is there an existing article with a nearly IDENTICAL title AND identical step-by
   return {
     isDuplicate: Boolean(args.is_duplicate) && (args.similarity_score as number) >= 95,
     similarTitle: args.similar_to as string,
-    score: args.similarity_score as number
+    score: args.similarity_score as number,
   };
 }
 
 // Step 2: Deep Web Research with Google Search Grounding (stable model)
 async function step2_research(
   apiKey: string,
-  topic: string
+  topic: string,
 ): Promise<{ research: string; sources: { title: string; url: string }[] }> {
   console.log("Pipeline Step 2: Deep Web Research (2.5 Flash + Google Search) for:", topic);
 
@@ -247,11 +270,22 @@ async function step2_research(
 
 Produce comprehensive, well-organized research notes of 500-800 words based on REAL information from the web. Cite specific facts and data.`;
 
-  const response = await callGemini(apiKey, MODEL_RESEARCH, [
-    { role: "user", parts: [{ text: `Research this topic thoroughly: "${topic}". Search the web for the most current and accurate information.` }] }
-  ], [
-    { google_search: {} }
-  ], systemPrompt);
+  const response = await callGemini(
+    apiKey,
+    MODEL_RESEARCH,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `Research this topic thoroughly: "${topic}". Search the web for the most current and accurate information.`,
+          },
+        ],
+      },
+    ],
+    [{ google_search: {} }],
+    systemPrompt,
+  );
 
   const research = extractText(response);
   const sources = extractGroundingSources(response);
@@ -276,9 +310,18 @@ The outline should follow this structure:
 
 Return ONLY the outline as a numbered/nested Markdown list. Be specific about what each section should cover.`;
 
-  const response = await callGemini(apiKey, MODEL_FAST, [
-    { role: "user", parts: [{ text: `Topic: "${topic}"\n\nResearch Notes:\n${research}\n\nCreate a detailed article outline.` }] }
-  ], undefined, systemPrompt);
+  const response = await callGemini(
+    apiKey,
+    MODEL_FAST,
+    [
+      {
+        role: "user",
+        parts: [{ text: `Topic: "${topic}"\n\nResearch Notes:\n${research}\n\nCreate a detailed article outline.` }],
+      },
+    ],
+    undefined,
+    systemPrompt,
+  );
 
   return extractText(response);
 }
@@ -291,14 +334,15 @@ async function step4_write(
   outline: string,
   categories: { id: string; name: string }[],
   sources: { title: string; url: string }[],
-  categoryId?: string
+  categoryId?: string,
 ): Promise<Record<string, unknown>> {
   console.log("Pipeline Step 4: Write Article (Gemini 3 Pro → fallback Flash)");
 
-  const categoryList = categories.map(c => `${c.name} (ID: ${c.id})`).join(", ");
-  const sourcesRef = sources.length > 0
-    ? `\n\nSOURCES TO REFERENCE:\n${sources.map((s, i) => `${i + 1}. [${s.title || 'Source'}](${s.url})`).join("\n")}`
-    : "";
+  const categoryList = categories.map((c) => `${c.name} (ID: ${c.id})`).join(", ");
+  const sourcesRef =
+    sources.length > 0
+      ? `\n\nSOURCES TO REFERENCE:\n${sources.map((s, i) => `${i + 1}. [${s.title || "Source"}](${s.url})`).join("\n")}`
+      : "";
 
   const systemPrompt = `You are an expert tech writer for DigitalHelp, a beginner-friendly tech help website.
 
@@ -328,31 +372,51 @@ WRITING RULES:
 
 You MUST respond using the generate_article function.`;
 
-  const response = await callGeminiWithFallback(apiKey, MODEL_PRO, MODEL_PRO_FALLBACK, [
-    { role: "user", parts: [{ text: `Write the full article about: "${topic}"` }] }
-  ], [
-    {
-      function_declarations: [{
-        name: "generate_article",
-        description: "Generate a structured help article with all required fields",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING", description: "SEO-friendly article title, clear and descriptive, under 70 chars" },
-            slug: { type: "STRING", description: "URL-friendly slug, lowercase with hyphens, no special chars" },
-            excerpt: { type: "STRING", description: "Brief 1-2 sentence summary for search results and previews" },
-            content: { type: "STRING", description: "Full article content in Markdown" },
-            category_id: { type: "STRING", description: "UUID of the best matching category" },
-            tags: { type: "ARRAY", items: { type: "STRING" }, description: "3-8 relevant tags" },
-            read_time: { type: "NUMBER", description: "Estimated reading time in minutes" },
-            seo_title: { type: "STRING", description: "SEO meta title under 60 characters" },
-            seo_description: { type: "STRING", description: "SEO meta description under 160 characters" }
+  const response = await callGeminiWithFallback(
+    apiKey,
+    MODEL_PRO,
+    MODEL_PRO_FALLBACK,
+    [{ role: "user", parts: [{ text: `Write the full article about: "${topic}"` }] }],
+    [
+      {
+        function_declarations: [
+          {
+            name: "generate_article",
+            description: "Generate a structured help article with all required fields",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                title: {
+                  type: "STRING",
+                  description: "SEO-friendly article title, clear and descriptive, under 70 chars",
+                },
+                slug: { type: "STRING", description: "URL-friendly slug, lowercase with hyphens, no special chars" },
+                excerpt: { type: "STRING", description: "Brief 1-2 sentence summary for search results and previews" },
+                content: { type: "STRING", description: "Full article content in Markdown" },
+                category_id: { type: "STRING", description: "UUID of the best matching category" },
+                tags: { type: "ARRAY", items: { type: "STRING" }, description: "3-8 relevant tags" },
+                read_time: { type: "NUMBER", description: "Estimated reading time in minutes" },
+                seo_title: { type: "STRING", description: "SEO meta title under 60 characters" },
+                seo_description: { type: "STRING", description: "SEO meta description under 160 characters" },
+              },
+              required: [
+                "title",
+                "slug",
+                "excerpt",
+                "content",
+                "category_id",
+                "tags",
+                "read_time",
+                "seo_title",
+                "seo_description",
+              ],
+            },
           },
-          required: ["title", "slug", "excerpt", "content", "category_id", "tags", "read_time", "seo_title", "seo_description"]
-        }
-      }]
-    }
-  ], systemPrompt);
+        ],
+      },
+    ],
+    systemPrompt,
+  );
 
   const args = extractFunctionCall(response);
   if (!args) throw new Error("AI did not return a structured article");
@@ -363,7 +427,7 @@ You MUST respond using the generate_article function.`;
 // Step 5: Fact Verification with Google Search Grounding (stable model)
 async function step5_factCheck(
   apiKey: string,
-  article: Record<string, unknown>
+  article: Record<string, unknown>,
 ): Promise<{ factualScore: number; verifiedClaims: string[]; flaggedClaims: string[] }> {
   console.log("Pipeline Step 5: Fact Verification (2.5 Flash + Google Search)");
 
@@ -373,37 +437,67 @@ async function step5_factCheck(
   const title = article.title as string;
 
   // Step 5a: Search the web to verify claims (Google Search only, NO function calling)
-  const searchResponse = await callGemini(apiKey, MODEL_RESEARCH, [
-    { role: "user", parts: [{ text: `Verify the key factual claims in this article by searching the web:\n\nTitle: ${title}\n\nContent:\n${content.substring(0, 5000)}\n\nExtract 3-5 key claims and check if they are accurate based on current web information. List each claim and whether it's verified or not.` }] }
-  ], [
-    { google_search: {} }
-  ], "You are a fact-checker. Verify claims using Google Search and report which are accurate and which are not.");
+  const searchResponse = await callGemini(
+    apiKey,
+    MODEL_RESEARCH,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `Verify the key factual claims in this article by searching the web:\n\nTitle: ${title}\n\nContent:\n${content.substring(0, 5000)}\n\nExtract 3-5 key claims and check if they are accurate based on current web information. List each claim and whether it's verified or not.`,
+          },
+        ],
+      },
+    ],
+    [{ google_search: {} }],
+    "You are a fact-checker. Verify claims using Google Search and report which are accurate and which are not.",
+  );
 
   const verificationText = extractText(searchResponse);
 
   await delay(2000);
 
   // Step 5b: Parse verification results into structured data (function calling only, NO google_search)
-  const parseResponse = await callGemini(apiKey, MODEL_LITE, [
-    { role: "user", parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }] }
-  ], [
-    {
-      function_declarations: [{
-        name: "fact_check",
-        description: "Return fact-check results",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            factual_score: { type: "NUMBER", description: "Overall factual accuracy score 0-10" },
-            verified_claims: { type: "ARRAY", items: { type: "STRING" }, description: "Claims verified as accurate" },
-            flagged_claims: { type: "ARRAY", items: { type: "STRING" }, description: "Claims that are inaccurate or unverifiable" },
-            overall_assessment: { type: "STRING", description: "Brief overall assessment" }
+  const parseResponse = await callGemini(
+    apiKey,
+    MODEL_LITE,
+    [
+      {
+        role: "user",
+        parts: [{ text: `Based on this fact-check analysis, provide a structured score:\n\n${verificationText}` }],
+      },
+    ],
+    [
+      {
+        function_declarations: [
+          {
+            name: "fact_check",
+            description: "Return fact-check results",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                factual_score: { type: "NUMBER", description: "Overall factual accuracy score 0-10" },
+                verified_claims: {
+                  type: "ARRAY",
+                  items: { type: "STRING" },
+                  description: "Claims verified as accurate",
+                },
+                flagged_claims: {
+                  type: "ARRAY",
+                  items: { type: "STRING" },
+                  description: "Claims that are inaccurate or unverifiable",
+                },
+                overall_assessment: { type: "STRING", description: "Brief overall assessment" },
+              },
+              required: ["factual_score", "verified_claims", "flagged_claims", "overall_assessment"],
+            },
           },
-          required: ["factual_score", "verified_claims", "flagged_claims", "overall_assessment"]
-        }
-      }]
-    }
-  ], "Parse the fact-check results into a structured format. Return using the fact_check function.");
+        ],
+      },
+    ],
+    "Parse the fact-check results into a structured format. Return using the fact_check function.",
+  );
 
   const args = extractFunctionCall(parseResponse);
   if (!args) {
@@ -413,7 +507,7 @@ async function step5_factCheck(
   return {
     factualScore: Math.round(args.factual_score as number) || 7,
     verifiedClaims: (args.verified_claims as string[]) || [],
-    flaggedClaims: (args.flagged_claims as string[]) || []
+    flaggedClaims: (args.flagged_claims as string[]) || [],
   };
 }
 
@@ -421,7 +515,7 @@ async function step5_factCheck(
 async function step6_qualityGate(
   apiKey: string,
   article: Record<string, unknown>,
-  factualScore: number
+  factualScore: number,
 ): Promise<{ article: Record<string, unknown>; qualityScore: number; reviewNotes: string; needsReview: boolean }> {
   console.log("Pipeline Step 6: Quality Gate + SEO (3 Flash)");
 
@@ -440,33 +534,49 @@ The article's factual verification score is ${factualScore}/10.
 
 Return your review using the quality_review function.`;
 
-  const response = await callGemini(apiKey, MODEL_FAST, [
-    {
-      role: "user",
-      parts: [{
-        text: `Review this article:\n\nTitle: ${article.title}\nExcerpt: ${article.excerpt}\n\nContent:\n${(article.content as string).substring(0, 5000)}\n\nSEO Title: ${article.seo_title}\nSEO Description: ${article.seo_description}\nTags: ${(article.tags as string[])?.join(", ")}`
-      }]
-    }
-  ], [
-    {
-      function_declarations: [{
-        name: "quality_review",
-        description: "Return quality improvements",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            quality_score: { type: "NUMBER", description: "Quality score out of 10" },
-            improved_title: { type: "STRING", description: "Improved title if needed, or same title" },
-            improved_seo_title: { type: "STRING", description: "Improved SEO title under 60 chars" },
-            improved_seo_description: { type: "STRING", description: "Improved SEO description under 160 chars" },
-            additional_tags: { type: "ARRAY", items: { type: "STRING" }, description: "Additional relevant tags" },
-            review_notes: { type: "STRING", description: "Brief review notes" }
+  const response = await callGemini(
+    apiKey,
+    MODEL_FAST,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `Review this article:\n\nTitle: ${article.title}\nExcerpt: ${article.excerpt}\n\nContent:\n${(article.content as string).substring(0, 5000)}\n\nSEO Title: ${article.seo_title}\nSEO Description: ${article.seo_description}\nTags: ${(article.tags as string[])?.join(", ")}`,
           },
-          required: ["quality_score", "improved_title", "improved_seo_title", "improved_seo_description", "review_notes"]
-        }
-      }]
-    }
-  ], systemPrompt);
+        ],
+      },
+    ],
+    [
+      {
+        function_declarations: [
+          {
+            name: "quality_review",
+            description: "Return quality improvements",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                quality_score: { type: "NUMBER", description: "Quality score out of 10" },
+                improved_title: { type: "STRING", description: "Improved title if needed, or same title" },
+                improved_seo_title: { type: "STRING", description: "Improved SEO title under 60 chars" },
+                improved_seo_description: { type: "STRING", description: "Improved SEO description under 160 chars" },
+                additional_tags: { type: "ARRAY", items: { type: "STRING" }, description: "Additional relevant tags" },
+                review_notes: { type: "STRING", description: "Brief review notes" },
+              },
+              required: [
+                "quality_score",
+                "improved_title",
+                "improved_seo_title",
+                "improved_seo_description",
+                "review_notes",
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    systemPrompt,
+  );
 
   const args = extractFunctionCall(response);
   if (!args) {
@@ -488,7 +598,7 @@ Return your review using the quality_review function.`;
     article,
     qualityScore,
     reviewNotes: (args.review_notes as string) || "",
-    needsReview: qualityScore < 7
+    needsReview: qualityScore < 7,
   };
 }
 
@@ -498,13 +608,13 @@ async function rewriteArticle(
   article: Record<string, unknown>,
   reviewNotes: string,
   research: string,
-  categories: { id: string; name: string }[]
+  categories: { id: string; name: string }[],
 ): Promise<Record<string, unknown>> {
   console.log("Pipeline: Rewriting article due to low quality score");
 
   await delay(3000);
 
-  const categoryList = categories.map(c => `${c.name} (ID: ${c.id})`).join(", ");
+  const categoryList = categories.map((c) => `${c.name} (ID: ${c.id})`).join(", ");
 
   const systemPrompt = `You are an expert tech writer. The previous version of this article scored below 7/10 quality.
 
@@ -519,31 +629,57 @@ Rewrite the article to address the feedback. Make it clearer, more complete, and
 
 You MUST respond using the generate_article function.`;
 
-  const response = await callGeminiWithFallback(apiKey, MODEL_PRO, MODEL_PRO_FALLBACK, [
-    { role: "user", parts: [{ text: `Rewrite this article to improve quality:\n\nTitle: ${article.title}\n\nContent:\n${(article.content as string).substring(0, 5000)}` }] }
-  ], [
-    {
-      function_declarations: [{
-        name: "generate_article",
-        description: "Generate a rewritten help article",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            title: { type: "STRING" },
-            slug: { type: "STRING" },
-            excerpt: { type: "STRING" },
-            content: { type: "STRING" },
-            category_id: { type: "STRING" },
-            tags: { type: "ARRAY", items: { type: "STRING" } },
-            read_time: { type: "NUMBER" },
-            seo_title: { type: "STRING" },
-            seo_description: { type: "STRING" }
+  const response = await callGeminiWithFallback(
+    apiKey,
+    MODEL_PRO,
+    MODEL_PRO_FALLBACK,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `Rewrite this article to improve quality:\n\nTitle: ${article.title}\n\nContent:\n${(article.content as string).substring(0, 5000)}`,
           },
-          required: ["title", "slug", "excerpt", "content", "category_id", "tags", "read_time", "seo_title", "seo_description"]
-        }
-      }]
-    }
-  ], systemPrompt);
+        ],
+      },
+    ],
+    [
+      {
+        function_declarations: [
+          {
+            name: "generate_article",
+            description: "Generate a rewritten help article",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                title: { type: "STRING" },
+                slug: { type: "STRING" },
+                excerpt: { type: "STRING" },
+                content: { type: "STRING" },
+                category_id: { type: "STRING" },
+                tags: { type: "ARRAY", items: { type: "STRING" } },
+                read_time: { type: "NUMBER" },
+                seo_title: { type: "STRING" },
+                seo_description: { type: "STRING" },
+              },
+              required: [
+                "title",
+                "slug",
+                "excerpt",
+                "content",
+                "category_id",
+                "tags",
+                "read_time",
+                "seo_title",
+                "seo_description",
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    systemPrompt,
+  );
 
   const args = extractFunctionCall(response);
   if (!args) return article;
@@ -559,7 +695,8 @@ serve(async (req) => {
 
   try {
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured. Add your Google Gemini API key in settings.");
+    if (!GEMINI_API_KEY)
+      throw new Error("GEMINI_API_KEY is not configured. Add your Google Gemini API key in settings.");
 
     const { user, db } = await authenticateAdmin(req);
     const { topic, categoryId, mode = "manual", skipDuplicateCheck = false } = await req.json();
@@ -576,12 +713,19 @@ serve(async (req) => {
       .order("created_at", { ascending: false })
       .limit(200);
 
-    const existingTitles = (existingArticles || []).map(a => a.title);
+    const existingTitles = (existingArticles || []).map((a) => a.title);
 
     // Create pipeline run record
     const { data: run, error: runError } = await db
       .from("agent_runs")
-      .insert({ topic, mode, status: "checking", current_step: 1, total_steps: 6, model_used: `${MODEL_PRO}→${MODEL_PRO_FALLBACK}` })
+      .insert({
+        topic,
+        mode,
+        status: "checking",
+        current_step: 1,
+        total_steps: 6,
+        model_used: `${MODEL_PRO}→${MODEL_PRO_FALLBACK}`,
+      })
       .select()
       .single();
     if (runError) {
@@ -598,12 +742,15 @@ serve(async (req) => {
         const dupCheck = await step1_duplicateCheck(GEMINI_API_KEY, topic, existingTitles);
 
         if (dupCheck.isDuplicate) {
-          await db.from("agent_runs").update({
-            status: "skipped",
-            current_step: 1,
-            error_message: `Topic too similar to existing article: "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
-            completed_at: new Date().toISOString(),
-          }).eq("id", runId);
+          await db
+            .from("agent_runs")
+            .update({
+              status: "skipped",
+              current_step: 1,
+              error_message: `Topic too similar to existing article: "${dupCheck.similarTitle}" (${dupCheck.score}% match)`,
+              completed_at: new Date().toISOString(),
+            })
+            .eq("id", runId);
 
           await db.from("agent_logs").insert({
             action: `Duplicate skipped: "${topic}"`,
@@ -626,10 +773,13 @@ serve(async (req) => {
       // STEP 2: Deep Web Research with Google Search Grounding (2.5 Flash)
       await updateRunStatus(db, runId, "researching", 2);
       const { research, sources } = await step2_research(GEMINI_API_KEY, topic);
-      await db.from("agent_runs").update({
-        research_notes: research,
-        research_sources: sources,
-      }).eq("id", runId);
+      await db
+        .from("agent_runs")
+        .update({
+          research_notes: research,
+          research_sources: sources,
+        })
+        .eq("id", runId);
 
       await delay(3000);
 
@@ -688,12 +838,20 @@ serve(async (req) => {
         sources: sources,
       };
 
-      let { data: savedArticle, error: insertError } = await db.from("articles").insert(insertPayload).select().single();
+      let { data: savedArticle, error: insertError } = await db
+        .from("articles")
+        .insert(insertPayload)
+        .select()
+        .single();
 
       // Handle slug conflict
       if (insertError?.message?.includes("unique")) {
         slug = `${slug}-${Date.now()}`;
-        const retry = await db.from("articles").insert({ ...insertPayload, slug }).select().single();
+        const retry = await db
+          .from("articles")
+          .insert({ ...insertPayload, slug })
+          .select()
+          .single();
         if (retry.error) throw retry.error;
         savedArticle = retry.data;
       } else if (insertError) {
@@ -701,20 +859,23 @@ serve(async (req) => {
       }
 
       // Complete the run
-      await db.from("agent_runs").update({
-        status: "completed",
-        current_step: 6,
-        article_id: savedArticle!.id,
-        completed_at: new Date().toISOString(),
-        token_usage: {
-          quality_score: qualityResult.qualityScore,
-          factual_score: factCheck.factualScore,
-          review_notes: qualityResult.reviewNotes,
-          verified_claims: factCheck.verifiedClaims,
-          flagged_claims: factCheck.flaggedClaims,
-          sources_count: sources.length,
-        },
-      }).eq("id", runId);
+      await db
+        .from("agent_runs")
+        .update({
+          status: "completed",
+          current_step: 6,
+          article_id: savedArticle!.id,
+          completed_at: new Date().toISOString(),
+          token_usage: {
+            quality_score: qualityResult.qualityScore,
+            factual_score: factCheck.factualScore,
+            review_notes: qualityResult.reviewNotes,
+            verified_claims: factCheck.verifiedClaims,
+            flagged_claims: factCheck.flaggedClaims,
+            sources_count: sources.length,
+          },
+        })
+        .eq("id", runId);
 
       // Log success
       await db.from("agent_logs").insert({
@@ -734,7 +895,9 @@ serve(async (req) => {
         },
       });
 
-      console.log(`AI Agent: Pipeline complete! Article: ${savedArticle!.id}, Quality: ${qualityResult.qualityScore}/10, Factual: ${factCheck.factualScore}/10`);
+      console.log(
+        `AI Agent: Pipeline complete! Article: ${savedArticle!.id}, Quality: ${qualityResult.qualityScore}/10, Factual: ${factCheck.factualScore}/10`,
+      );
 
       return jsonResp({
         ...savedArticle,
@@ -744,14 +907,16 @@ serve(async (req) => {
         _review_notes: qualityResult.reviewNotes,
         _sources_count: sources.length,
       });
-
     } catch (pipelineError) {
       const errMsg = pipelineError instanceof Error ? pipelineError.message : "Pipeline failed";
-      await db.from("agent_runs").update({
-        status: "failed",
-        error_message: errMsg,
-        completed_at: new Date().toISOString(),
-      }).eq("id", runId);
+      await db
+        .from("agent_runs")
+        .update({
+          status: "failed",
+          error_message: errMsg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", runId);
 
       await db.from("agent_logs").insert({
         action: `Pipeline failed: "${topic}"`,
@@ -761,11 +926,11 @@ serve(async (req) => {
 
       throw pipelineError;
     }
-
   } catch (error: unknown) {
     console.error("AI Agent error:", error);
     const statusCode = (error as { status?: number })?.status || 500;
-    const message = error instanceof Error ? error.message : (error as { message?: string })?.message || "Unknown error";
+    const message =
+      error instanceof Error ? error.message : (error as { message?: string })?.message || "Unknown error";
     return jsonResp({ error: message }, statusCode);
   }
 });
