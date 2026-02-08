@@ -179,32 +179,42 @@ export default function AIAgentPanel() {
       .order("priority", { ascending: true })
       .order("created_at", { ascending: true });
     
-    // Also check if any are processing (batch is running server-side)
+    // Count processing items (batch is running server-side)
     const { count: processingCount } = await supabase
       .from("nightly_builder_queue")
       .select("*", { count: "exact", head: true })
       .eq("status", "processing")
       .is("run_date", null);
 
-    const isProcessing = (processingCount || 0) > 0;
+    // Count already-completed items to get accurate total
+    const { count: doneCount } = await supabase
+      .from("nightly_builder_queue")
+      .select("*", { count: "exact", head: true })
+      .in("status", ["completed", "failed", "skipped"])
+      .is("run_date", null);
 
-    if (data && data.length > 0) {
-      const topics: DiscoveredTopic[] = data.map(d => ({
+    const isProcessing = (processingCount || 0) > 0;
+    const pendingCount = data?.length || 0;
+    const totalAll = pendingCount + (processingCount || 0) + (doneCount || 0);
+
+    if (pendingCount > 0) {
+      const topics: DiscoveredTopic[] = data!.map(d => ({
         topic: d.topic,
         category_id: d.category_id || "",
         priority: (d.priority === 1 ? "high" : d.priority === 2 ? "medium" : "low") as "high" | "medium" | "low",
         reasoning: "",
       }));
       setBatchQueue(topics);
-      setBatchTotal(data.length + (processingCount || 0));
-      // If anything is processing server-side, mark batch as running
+      setBatchTotal(totalAll);
+      setBatchProgress(doneCount || 0);
       if (isProcessing) {
         setBatchRunning(true);
       }
     } else if (isProcessing) {
       // Items are being processed but none pending — batch is finishing
       setBatchRunning(true);
-      setBatchTotal(processingCount || 0);
+      setBatchTotal(totalAll);
+      setBatchProgress(doneCount || 0);
       setBatchQueue([]);
     } else {
       setBatchQueue([]);
@@ -265,9 +275,12 @@ export default function AIAgentPanel() {
         .in("status", ["pending", "processing"])
         .is("run_date", null);
 
-      setBatchProgress(doneCount || 0);
+      const done = doneCount || 0;
+      const pending = pendingCount || 0;
+      setBatchProgress(done);
+      setBatchTotal(done + pending);
       
-      if ((pendingCount || 0) === 0) {
+      if (pending === 0) {
         // Batch complete
         setBatchRunning(false);
         setBatchQueue([]);
