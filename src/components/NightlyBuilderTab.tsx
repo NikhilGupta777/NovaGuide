@@ -258,7 +258,7 @@ export default function NightlyBuilderTab() {
           <h3 className="font-semibold text-foreground">Nightly Content Builder</h3>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Uses Gemini Flash + Google Search grounding to find 30-100+ common questions per category, then generates all articles autonomously with auto-publish.
+          Uses Deep Research AI to discover 30-100+ trending questions per category, then generates all articles autonomously with quality scoring and auto-publish.
         </p>
 
         <div className="space-y-5">

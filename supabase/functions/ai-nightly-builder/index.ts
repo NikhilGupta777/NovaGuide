@@ -460,6 +460,7 @@ async function runNightlyBuilder(batch: number) {
 
   await db.from("nightly_builder_settings").update({
     last_run_at: new Date().toISOString(),
+    next_run_at: null, // Clear stale next_run_at during active run
   }).eq("id", settings.id);
 
   try {
@@ -553,11 +554,12 @@ async function runBatch1(
       };
       categoriesProcessed++;
 
-      // Deep Research: 1 RPM limit — wait 65s between categories
-      // (the polling inside deepResearchCategory already takes time,
-      // but we add a buffer to respect the RPM limit for starting new interactions)
-      console.log(`Waiting 65s before next Deep Research call (RPM limit)...`);
-      await delay(65000);
+      // Deep Research: 1 RPM limit — wait 65s between categories (skip after last one)
+      const isLastCategory = categories.indexOf(category) === categories.length - 1;
+      if (!isLastCategory) {
+        console.log(`Waiting 65s before next Deep Research call (RPM limit)...`);
+        await delay(65000);
+      }
     } catch (err) {
       console.error(`Error researching category "${category.name}":`, err);
       detailsMap[category.name] = {
@@ -786,7 +788,24 @@ Return ONLY a valid JSON array.`;
   }).eq("id", runId);
 
   // Phase F: Start generating Batch 1 articles via parallel self-chaining
-  const parallelism = Math.min(5, batch1Items.length, 7);
+  if (batch1Items.length === 0) {
+    console.log("Phase F: Batch 1 is empty after dedup. Marking run as completed.");
+    await db.from("nightly_builder_runs").update({
+      status: "completed",
+      completed_at: new Date().toISOString(),
+    }).eq("id", runId);
+
+    // Update next_run_at so frontend shows correct schedule
+    try {
+      const nextRun = calculateNextRunAt();
+      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).eq("id", settingsId);
+    } catch (e) {
+      console.error("Failed to set next_run_at:", e);
+    }
+    return;
+  }
+
+  const parallelism = Math.min(batch1Items.length, 7);
   console.log(`Phase F: Starting Batch 1 article generation (${parallelism} parallel chains)...`);
   for (let i = 0; i < parallelism; i++) {
     selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
@@ -819,7 +838,7 @@ async function runOverflowBatch(
     return;
   }
 
-  const parallelism = Math.min(5, count, 7);
+  const parallelism = Math.min(count, 7);
   console.log(`Processing ${count} pending items for batch ${batch} (${parallelism} parallel chains)...`);
   await db.from("nightly_builder_runs").update({ status: "generating" }).eq("id", runId);
   for (let i = 0; i < parallelism; i++) {
@@ -1160,11 +1179,11 @@ function selfChainManualBatch(autoPublish: boolean) {
   const db = serviceClient();
   db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
-    .in("status", ["pending", "processing"])
+    .eq("status", "pending")
     .is("run_date", null)
     .then(({ count }) => {
       if (count && count > 0) {
-        console.log(`Self-invoking for next manual batch item (${count} remaining/recoverable)...`);
+        console.log(`Self-invoking for next manual batch item (${count} remaining)...`);
         selfInvoke({ action: "generate_manual_batch", autoPublish });
       } else {
         console.log("Manual batch fully complete — all items processed.");
@@ -1239,7 +1258,7 @@ serve(async (req) => {
         return jsonResp({ success: true, message: "No items to process" });
       }
 
-      const parallelism = Math.min(body.parallelism || 5, pendingCount, 7);
+      const parallelism = Math.min(pendingCount, body.parallelism || 7);
       console.log(`Starting manual batch generation (${pendingCount} items, ${parallelism} parallel chains)...`);
       
       for (let i = 0; i < parallelism; i++) {
