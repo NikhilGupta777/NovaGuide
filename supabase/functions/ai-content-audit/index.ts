@@ -25,6 +25,19 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Self-Chaining: fire-and-forget call to ourselves ─────────────
+function selfInvoke(body: Record<string, unknown>) {
+  const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ai-content-audit`;
+  fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+    },
+    body: JSON.stringify(body),
+  }).catch(err => console.error("Self-invoke failed:", err));
+}
+
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODEL = "gemini-2.5-flash";
 
@@ -193,12 +206,11 @@ Apply only these minor fixes and return the corrected article as JSON.`;
   return null;
 }
 
-// ── Chunked Audit: processes one batch per invocation ─────────────
-// The client calls this repeatedly until remaining === 0.
+// ── Self-Chaining Scan: processes SCAN_BATCH_SIZE articles, then self-invokes for next batch ─
 
 const SCAN_BATCH_SIZE = 3;
 
-async function runAuditChunk(autoFix: boolean, runId?: string) {
+async function runScanChunk(autoFix: boolean, runId: string) {
   const db = serviceClient();
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
@@ -210,75 +222,15 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
 
   if (artErr) throw artErr;
   if (!articles || articles.length === 0) {
-    if (runId) {
-      await db.from("content_audit_runs").update({
-        status: "completed",
-        total_articles_scanned: 0,
-        completed_at: new Date().toISOString(),
-      }).eq("id", runId);
-    }
-    return { runId, remaining: 0, phase: "done" };
-  }
-
-  // Create run if first call
-  if (!runId) {
-    const { data: runData } = await db.from("content_audit_runs").insert({
-      status: "scanning",
-      started_at: new Date().toISOString(),
-    }).select().single();
-    runId = runData?.id;
-    if (!runId) throw new Error("Failed to create audit run");
-
-    // Phase 1: Duplicate detection (fast, do it all in first call)
-    console.log("Phase 1: Detecting duplicates...");
-    const duplicates = findDuplicates(articles);
-    let articlesSetToDraft = 0;
-
-    for (const dup of duplicates) {
-      await db.from("content_audit_findings").insert({
-        run_id: runId,
-        article_id: dup.articleId,
-        article_title: dup.articleTitle,
-        issue_type: "duplicate",
-        severity: "critical",
-        description: `Duplicate or near-duplicate of "${dup.relatedTitle}" (${dup.similarity})`,
-        suggestion: "Consider merging these articles or removing the duplicate.",
-        related_article_id: dup.relatedId,
-        related_article_title: dup.relatedTitle,
-        status: "open",
-      });
-
-      const newerArticle = articles.find(a => a.id === dup.relatedId);
-      if (newerArticle && newerArticle.status === "published") {
-        await db.from("articles").update({ status: "draft" }).eq("id", dup.relatedId);
-        articlesSetToDraft++;
-
-        await db.from("content_audit_findings").insert({
-          run_id: runId,
-          article_id: dup.relatedId,
-          article_title: dup.relatedTitle,
-          issue_type: "auto_action",
-          severity: "warning",
-          description: `Automatically set to draft because it's a duplicate of "${dup.articleTitle}"`,
-          suggestion: "Review and decide whether to merge, edit, or delete.",
-          auto_fixed: true,
-          fix_applied: "Set status from published to draft",
-          status: "resolved",
-        });
-      }
-    }
-
     await db.from("content_audit_runs").update({
-      duplicates_found: duplicates.length,
-      articles_set_to_draft: articlesSetToDraft,
+      status: "completed",
       total_articles_scanned: 0,
+      completed_at: new Date().toISOString(),
     }).eq("id", runId);
-
-    return { runId, remaining: articles.length, phase: "scanning" };
+    return;
   }
 
-  // Subsequent calls: figure out which articles haven't been analyzed yet
-  // We track progress by checking which article IDs already have findings
+  // Figure out which articles haven't been analyzed yet
   const { data: existingFindings } = await db.from("content_audit_findings")
     .select("article_id")
     .eq("run_id", runId)
@@ -307,7 +259,7 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
     }).eq("id", runId);
 
     console.log(`Audit complete: ${articles.length} scanned`);
-    return { runId, remaining: 0, phase: "done" };
+    return;
   }
 
   // Process next batch
@@ -316,12 +268,10 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
 
   try {
     const results = await analyzeArticlesBatch(apiKey, batch);
-    let batchIssues = 0;
     let batchAutoFixes = 0;
 
     for (const result of results) {
       if (!result.issues || result.issues.length === 0) {
-        // Insert a marker so we know this article was scanned
         await db.from("content_audit_findings").insert({
           run_id: runId,
           article_id: result.articleId,
@@ -345,7 +295,6 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
           suggestion: issue.suggestion,
           status: "open",
         });
-        batchIssues++;
       }
 
       // Auto-fix minor issues if enabled
@@ -388,7 +337,7 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
       }
     }
 
-    // Also handle articles that AI didn't return results for
+    // Handle articles that AI didn't return results for
     for (const art of batch) {
       const hasResult = results.some(r => r.articleId === art.id);
       if (!hasResult) {
@@ -412,7 +361,6 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
 
   } catch (err) {
     console.error(`Batch analysis error:`, err);
-    // Still mark these articles as scanned to avoid infinite loop
     for (const art of batch) {
       if (!scannedIds.has(art.id)) {
         await db.from("content_audit_findings").insert({
@@ -431,11 +379,114 @@ async function runAuditChunk(autoFix: boolean, runId?: string) {
     }).eq("id", runId);
   }
 
+  // Self-chain: invoke ourselves for the next batch
   const newRemaining = unscanned.length - batch.length;
-  return { runId, remaining: newRemaining, phase: "scanning" };
+  if (newRemaining > 0) {
+    console.log(`Self-invoking for next batch (${newRemaining} remaining)...`);
+    selfInvoke({ action: "scan_chunk", runId, autoFix });
+  } else {
+    // Final chunk done — mark complete
+    const { count: totalIssues } = await db.from("content_audit_findings")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", runId);
+    const { count: autoFixCount } = await db.from("content_audit_findings")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", runId)
+      .eq("auto_fixed", true);
+
+    await db.from("content_audit_runs").update({
+      status: "completed",
+      total_articles_scanned: (scannedIds.size + batch.length),
+      total_issues_found: totalIssues ?? 0,
+      auto_fixes_applied: autoFixCount ?? 0,
+      completed_at: new Date().toISOString(),
+    }).eq("id", runId);
+    console.log(`Audit complete.`);
+  }
 }
 
-// ── Chunked Fix All: processes a few findings per invocation ──────
+// ── Start a new scan (first call only) ───────────────────────────
+
+async function startScan(autoFix: boolean): Promise<string> {
+  const db = serviceClient();
+
+  // Load ALL articles for dup detection
+  const { data: articles, error: artErr } = await db.from("articles")
+    .select("id, title, slug, content, excerpt, status, category_id")
+    .order("created_at", { ascending: false });
+
+  if (artErr) throw artErr;
+
+  // Create run
+  const { data: runData } = await db.from("content_audit_runs").insert({
+    status: "scanning",
+    started_at: new Date().toISOString(),
+  }).select().single();
+  const runId = runData?.id;
+  if (!runId) throw new Error("Failed to create audit run");
+
+  if (!articles || articles.length === 0) {
+    await db.from("content_audit_runs").update({
+      status: "completed",
+      total_articles_scanned: 0,
+      completed_at: new Date().toISOString(),
+    }).eq("id", runId);
+    return runId;
+  }
+
+  // Phase 1: Duplicate detection (fast, do it all now)
+  console.log("Phase 1: Detecting duplicates...");
+  const duplicates = findDuplicates(articles);
+  let articlesSetToDraft = 0;
+
+  for (const dup of duplicates) {
+    await db.from("content_audit_findings").insert({
+      run_id: runId,
+      article_id: dup.articleId,
+      article_title: dup.articleTitle,
+      issue_type: "duplicate",
+      severity: "critical",
+      description: `Duplicate or near-duplicate of "${dup.relatedTitle}" (${dup.similarity})`,
+      suggestion: "Consider merging these articles or removing the duplicate.",
+      related_article_id: dup.relatedId,
+      related_article_title: dup.relatedTitle,
+      status: "open",
+    });
+
+    const newerArticle = articles.find(a => a.id === dup.relatedId);
+    if (newerArticle && newerArticle.status === "published") {
+      await db.from("articles").update({ status: "draft" }).eq("id", dup.relatedId);
+      articlesSetToDraft++;
+
+      await db.from("content_audit_findings").insert({
+        run_id: runId,
+        article_id: dup.relatedId,
+        article_title: dup.relatedTitle,
+        issue_type: "auto_action",
+        severity: "warning",
+        description: `Automatically set to draft because it's a duplicate of "${dup.articleTitle}"`,
+        suggestion: "Review and decide whether to merge, edit, or delete.",
+        auto_fixed: true,
+        fix_applied: "Set status from published to draft",
+        status: "resolved",
+      });
+    }
+  }
+
+  await db.from("content_audit_runs").update({
+    duplicates_found: duplicates.length,
+    articles_set_to_draft: articlesSetToDraft,
+    total_articles_scanned: 0,
+  }).eq("id", runId);
+
+  // Self-chain: kick off the first AI scan batch
+  console.log(`Duplicates done. Self-invoking for AI scan (${articles.length} articles)...`);
+  selfInvoke({ action: "scan_chunk", runId, autoFix });
+
+  return runId;
+}
+
+// ── Self-Chaining Fix All ────────────────────────────────────────
 
 const FIX_BATCH_SIZE = 3;
 
@@ -453,7 +504,8 @@ async function fixAllChunk(runId: string) {
 
   if (!openFindings || openFindings.length === 0) {
     await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", runId);
-    return { remaining: 0, fixed: 0 };
+    console.log(`Fix all complete for run ${runId}`);
+    return;
   }
 
   // Mark as fixing
@@ -479,12 +531,15 @@ async function fixAllChunk(runId: string) {
     .not("suggestion", "is", null);
 
   const rem = remaining ?? 0;
+  console.log(`Fix chunk done: ${fixed} fixed this batch, ${rem} remaining`);
+
   if (rem === 0) {
     await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", runId);
+  } else {
+    // Self-chain for next batch
+    console.log(`Self-invoking fix_all for next batch (${rem} remaining)...`);
+    selfInvoke({ action: "fix_all", runId });
   }
-
-  console.log(`Fix chunk done: ${fixed} fixed this batch, ${rem} remaining`);
-  return { remaining: rem, fixed };
 }
 
 // ── Apply Fix to Single Article ──────────────────────────────────
@@ -579,11 +634,11 @@ Apply this fix and return the corrected article as JSON.`;
   const jsonMatch = result.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("AI did not return valid JSON");
 
-  const fixed = JSON.parse(jsonMatch[0]);
+  const fixedData = JSON.parse(jsonMatch[0]);
   const updatePayload: Record<string, unknown> = {};
-  if (fixed.title && fixed.title !== article.title) updatePayload.title = fixed.title;
-  if (fixed.content && fixed.content !== article.content) updatePayload.content = fixed.content;
-  if (fixed.excerpt && fixed.excerpt !== article.excerpt) updatePayload.excerpt = fixed.excerpt;
+  if (fixedData.title && fixedData.title !== article.title) updatePayload.title = fixedData.title;
+  if (fixedData.content && fixedData.content !== article.content) updatePayload.content = fixedData.content;
+  if (fixedData.excerpt && fixedData.excerpt !== article.excerpt) updatePayload.excerpt = fixedData.excerpt;
 
   const actuallyChanged = Object.keys(updatePayload).length > 0;
 
@@ -592,7 +647,7 @@ Apply this fix and return the corrected article as JSON.`;
     await db.from("content_audit_findings").update({
       status: "resolved",
       auto_fixed: true,
-      fix_applied: fixed.fixDescription || "Applied AI-suggested fix",
+      fix_applied: fixedData.fixDescription || "Applied AI-suggested fix",
     }).eq("id", findingId);
   } else {
     await db.from("content_audit_findings").update({
@@ -602,7 +657,7 @@ Apply this fix and return the corrected article as JSON.`;
     console.log(`No actual changes for finding ${findingId} — keeping open`);
   }
 
-  return { fixed: actuallyChanged, description: fixed.fixDescription };
+  return { fixed: actuallyChanged, description: fixedData.fixDescription };
 }
 
 // ── HTTP Handler ──────────────────────────────────────────────────
@@ -619,6 +674,7 @@ serve(async (req) => {
     const token = authHeader.replace("Bearer ", "");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+    // Allow service-role key (for self-invocation) or admin user
     if (token !== serviceKey) {
       const userClient = createClient(
         Deno.env.get("SUPABASE_URL")!,
@@ -639,6 +695,13 @@ serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
 
+    // Internal self-chain: scan chunk
+    if (body.action === "scan_chunk" && body.runId) {
+      console.log(`Self-chained scan chunk for run: ${body.runId}`);
+      await runScanChunk(body.autoFix !== false, body.runId);
+      return jsonResp({ success: true });
+    }
+
     // Handle "apply fix" action — single finding
     if (body.action === "apply_fix" && body.findingId) {
       console.log(`Applying fix to finding: ${body.findingId}`);
@@ -646,21 +709,18 @@ serve(async (req) => {
       return jsonResp({ success: true, ...result });
     }
 
-    // Handle "fix_all" action — chunked, processes FIX_BATCH_SIZE per call
+    // Handle "fix_all" action — self-chaining
     if (body.action === "fix_all" && body.runId) {
-      console.log(`Fix all chunk for run: ${body.runId}`);
-      const result = await fixAllChunk(body.runId);
-      return jsonResp({ success: true, ...result });
+      console.log(`Fix all (self-chaining) for run: ${body.runId}`);
+      await fixAllChunk(body.runId);
+      return jsonResp({ success: true, message: "Fix all started/continuing in background" });
     }
 
-    // Handle "scan" action — chunked, processes SCAN_BATCH_SIZE per call
-    // Pass runId to resume an existing scan
+    // Handle "start_scan" — creates run, does dups, self-chains for AI scan
     const autoFix = body.autoFix !== false;
-    const existingRunId = body.runId || undefined;
-    console.log(`Audit chunk (autoFix: ${autoFix}, runId: ${existingRunId || "new"})`);
-
-    const result = await runAuditChunk(autoFix, existingRunId);
-    return jsonResp({ success: true, ...result });
+    console.log(`Starting new audit scan (autoFix: ${autoFix})`);
+    const runId = await startScan(autoFix);
+    return jsonResp({ success: true, runId, message: "Audit started in background" });
 
   } catch (err) {
     console.error("Content audit handler error:", err);

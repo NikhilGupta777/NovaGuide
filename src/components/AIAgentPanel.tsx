@@ -102,8 +102,7 @@ export default function AIAgentPanel() {
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
-  const batchAbortRef = useRef(false);
-  const batchRunningRef = useRef(false);
+  const [batchTotal, setBatchTotal] = useState(0);
 
   // Automation
   const [autoSettings, setAutoSettings] = useState<AutoSettings | null>(null);
@@ -177,7 +176,15 @@ export default function AIAgentPanel() {
       .is("run_date", null)
       .order("priority", { ascending: true })
       .order("created_at", { ascending: true });
-    if (data && data.length > 0 && !batchRunningRef.current) {
+    
+    // Also check if any are processing (batch is running server-side)
+    const { count: processingCount } = await supabase
+      .from("nightly_builder_queue")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "processing")
+      .is("run_date", null);
+
+    if (data && data.length > 0) {
       const topics: DiscoveredTopic[] = data.map(d => ({
         topic: d.topic,
         category_id: d.category_id || "",
@@ -185,25 +192,26 @@ export default function AIAgentPanel() {
         reasoning: "",
       }));
       setBatchQueue(topics);
-      return topics;
+      setBatchTotal(data.length + (processingCount || 0));
+    } else if ((processingCount || 0) > 0) {
+      // Items are being processed but none pending — batch is finishing
+      setBatchRunning(true);
+      setBatchTotal(processingCount || 0);
+      setBatchQueue([]);
+    } else {
+      setBatchQueue([]);
+      setBatchRunning(false);
     }
-    return [];
+    return data || [];
   }, []);
 
-  // Auto-resume batch on mount if there was a batch running before refresh
+  // On mount: load data and detect running batch
   useEffect(() => {
     const init = async () => {
       await fetchRuns();
       await fetchAutoSettings();
       await fetchLatestDiscoverRun();
-      const pendingTopics = await fetchBatchQueue();
-
-      // Check if batch was previously running (stored in localStorage)
-      const wasRunning = localStorage.getItem("batch_running") === "true";
-      if (wasRunning && pendingTopics.length > 0 && !batchRunningRef.current) {
-        console.log(`Auto-resuming batch with ${pendingTopics.length} pending topics`);
-        runBatch(pendingTopics);
-      }
+      await fetchBatchQueue();
     };
     init();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,6 +238,38 @@ export default function AIAgentPanel() {
     }, 2000);
     return () => clearInterval(interval);
   }, [pollingRunId]);
+
+  // Poll for batch queue progress (server-side processing)
+  useEffect(() => {
+    if (!batchRunning) return;
+    const interval = setInterval(async () => {
+      // Count completed + failed + skipped items (done)
+      const { count: doneCount } = await supabase
+        .from("nightly_builder_queue")
+        .select("*", { count: "exact", head: true })
+        .in("status", ["completed", "failed", "skipped"])
+        .is("run_date", null);
+
+      // Count still pending + processing
+      const { count: pendingCount } = await supabase
+        .from("nightly_builder_queue")
+        .select("*", { count: "exact", head: true })
+        .in("status", ["pending", "processing"])
+        .is("run_date", null);
+
+      setBatchProgress(doneCount || 0);
+      
+      if ((pendingCount || 0) === 0) {
+        // Batch complete
+        setBatchRunning(false);
+        setBatchQueue([]);
+        toast({ title: "Batch Complete!", description: `Processed ${doneCount || 0} articles.` });
+        fetchRuns();
+        refetchArticles();
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [batchRunning, toast, fetchRuns, refetchArticles]);
 
   // Poll for running discover run
   useEffect(() => {
@@ -318,11 +358,20 @@ export default function AIAgentPanel() {
       setDiscovering(false);
       toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
 
-      // Auto-make: push all to batch and start generating
+      // Auto-make: push all to batch and start generating server-side
       if (autoMake && topics.length > 0) {
+        // Topics are already in nightly_builder_queue (added by addToQueue below or by edge function)
+        for (const t of topics) {
+          await supabase.from("nightly_builder_queue").upsert({
+            topic: t.topic,
+            category_id: t.category_id || null,
+            priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
+            status: "pending",
+          }, { onConflict: "topic" }).select();
+        }
         setBatchQueue(topics);
-        toast({ title: "Auto-Make Active", description: `Pushing ${topics.length} topics to batch and starting generation...` });
-        await runBatch(topics);
+        toast({ title: "Auto-Make Active", description: `Pushing ${topics.length} topics to batch...` });
+        await startServerBatch();
       }
     } catch (err: unknown) {
       // Edge function error handler already marks the run as failed in DB
@@ -334,78 +383,31 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Core batch runner (reusable for auto-make and manual batch)
-  const runBatch = async (items: DiscoveredTopic[]) => {
-    if (items.length === 0) return;
-    batchAbortRef.current = false;
-    batchRunningRef.current = true;
+  // Fire-and-forget batch: tell server to start processing the manual queue
+  const startServerBatch = async () => {
     setBatchRunning(true);
-    setBatchProgress(0);
-    localStorage.setItem("batch_running", "true");
-    let successCount = 0;
-    let failCount = 0;
-    for (let i = 0; i < items.length; i++) {
-      if (batchAbortRef.current) {
-        toast({ title: "Batch Stopped", description: `Stopped after ${successCount} articles. ${items.length - i} remaining skipped.` });
-        break;
-      }
-      const item = items[i];
-      setBatchProgress(i + 1);
-      try {
-        const { data, error } = await supabase.functions.invoke("ai-agent", {
-          body: { topic: item.topic, categoryId: item.category_id, mode: "batch" },
-        });
-        if (error) throw error;
-        if (data?.error) throw new Error(data.error);
-        if (data?.skipped) {
-          console.log(`Batch item ${i} skipped: ${data.reason}`);
-        } else {
-          successCount++;
-          // Auto-publish if toggle is on
-          const articleId = data?.id;
-          if (autoPublish && articleId) {
-            await supabase.from("articles").update({
-              status: "published",
-              published_at: new Date().toISOString(),
-            }).eq("id", articleId);
-          }
-        }
-        // Mark queue item done in DB
-        await supabase.from("nightly_builder_queue")
-          .delete()
-          .eq("topic", item.topic)
-          .eq("status", "pending")
-          .is("run_date", null);
-      } catch (err) {
-        console.error(`Batch item ${i} failed:`, err);
-        failCount++;
-      }
-      // Refresh runs list after each item
-      fetchRuns();
-      if (i < items.length - 1 && !batchAbortRef.current) {
-        await new Promise(r => setTimeout(r, 5000));
-      }
-    }
-    if (!batchAbortRef.current) {
-      toast({
-        title: "Batch Complete!",
-        description: `${successCount} articles generated, ${failCount} failed.`,
+    try {
+      const { error } = await supabase.functions.invoke("ai-nightly-builder", {
+        body: { action: "start_manual_batch", autoPublish },
       });
+      if (error) throw error;
+      toast({ title: "Batch Started", description: "Generating articles in background — you can navigate away safely." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start batch";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+      setBatchRunning(false);
     }
-    setBatchQueue([]);
-    setBatchRunning(false);
-    batchRunningRef.current = false;
-    setBatchProgress(0);
-    localStorage.removeItem("batch_running");
-    batchAbortRef.current = false;
-    refetchArticles();
-    fetchRuns();
   };
 
-  const handleStopBatch = () => {
-    batchAbortRef.current = true;
-    localStorage.removeItem("batch_running");
-    toast({ title: "Stopping...", description: "Will stop after the current article finishes." });
+  const handleStopBatch = async () => {
+    // Mark all pending manual queue items as "skipped" to stop the chain
+    await supabase.from("nightly_builder_queue")
+      .update({ status: "skipped", error_message: "Stopped by user" })
+      .eq("status", "pending")
+      .is("run_date", null);
+    setBatchRunning(false);
+    setBatchQueue([]);
+    toast({ title: "Batch Stopped", description: "Remaining items have been skipped." });
   };
 
   // Batch generate (manual trigger)
@@ -414,7 +416,7 @@ export default function AIAgentPanel() {
       toast({ title: "Error", description: "Add topics to the batch queue first.", variant: "destructive" });
       return;
     }
-    await runBatch(batchQueue);
+    await startServerBatch();
   };
 
   // Save automation settings
