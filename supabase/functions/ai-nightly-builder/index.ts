@@ -8,8 +8,8 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash";
-const MODEL_LITE = "gemini-2.5-flash-lite";
+const MODEL_FLASH = "gemini-2.5-pro";
+const MODEL_LITE = "gemini-2.5-flash";
 
 // Safe icons that exist in the frontend iconMap
 const SAFE_ICONS = [
@@ -75,7 +75,7 @@ async function deepResearchCategory(
 ): Promise<string[]> {
   console.log(`Deep researching category: ${categoryName}`);
 
-  const prompt = `You are researching for a general help website called DigitalHelp.
+  const prompt = `You are researching for a tech help website called DigitalHelp.
 
 CATEGORY: ${categoryName}
 DESCRIPTION: ${categoryDescription || "General tech help articles"}
@@ -96,7 +96,7 @@ Focus on:
 IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
 
 Return ONLY a valid JSON array of strings with ${topicsCount} unique, specific questions/topics. Each should be a clear, searchable question or how-to title.
-Example: ["How to reset iPhone password", "how to go live on youtube", "Fix slow WiFi connection on Windows 11"]`;
+Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
 
   // Use Gemini Flash with Google Search grounding for real web data
   const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${apiKey}`;
