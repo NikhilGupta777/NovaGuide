@@ -185,10 +185,29 @@ export default function AIAgentPanel() {
         reasoning: "",
       }));
       setBatchQueue(topics);
+      return topics;
     }
+    return [];
   }, []);
 
-  useEffect(() => { fetchRuns(); fetchAutoSettings(); fetchLatestDiscoverRun(); fetchBatchQueue(); }, [fetchRuns, fetchAutoSettings, fetchLatestDiscoverRun, fetchBatchQueue]);
+  // Auto-resume batch on mount if there was a batch running before refresh
+  useEffect(() => {
+    const init = async () => {
+      await fetchRuns();
+      await fetchAutoSettings();
+      await fetchLatestDiscoverRun();
+      const pendingTopics = await fetchBatchQueue();
+
+      // Check if batch was previously running (stored in localStorage)
+      const wasRunning = localStorage.getItem("batch_running") === "true";
+      if (wasRunning && pendingTopics.length > 0 && !batchRunningRef.current) {
+        console.log(`Auto-resuming batch with ${pendingTopics.length} pending topics`);
+        runBatch(pendingTopics);
+      }
+    };
+    init();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Poll for active run status
   useEffect(() => {
@@ -322,6 +341,7 @@ export default function AIAgentPanel() {
     batchRunningRef.current = true;
     setBatchRunning(true);
     setBatchProgress(0);
+    localStorage.setItem("batch_running", "true");
     let successCount = 0;
     let failCount = 0;
     for (let i = 0; i < items.length; i++) {
@@ -376,6 +396,7 @@ export default function AIAgentPanel() {
     setBatchRunning(false);
     batchRunningRef.current = false;
     setBatchProgress(0);
+    localStorage.removeItem("batch_running");
     batchAbortRef.current = false;
     refetchArticles();
     fetchRuns();
@@ -383,6 +404,7 @@ export default function AIAgentPanel() {
 
   const handleStopBatch = () => {
     batchAbortRef.current = true;
+    localStorage.removeItem("batch_running");
     toast({ title: "Stopping...", description: "Will stop after the current article finishes." });
   };
 

@@ -781,23 +781,32 @@ serve(async (req) => {
 
     console.log(`Nightly Builder triggered for batch ${batch}`);
 
-    // Run the builder and await completion — fire-and-forget dies when the container shuts down
-    // Edge functions have ~400s max, so this may time out on very large workloads
-    try {
-      await runNightlyBuilder(batch);
+    // Run in background if possible (survives client disconnect)
+    const work = (async () => {
+      try {
+        await runNightlyBuilder(batch);
+      } catch (e) {
+        console.error("Nightly builder execution error:", e);
+      }
+    })();
+
+    // @ts-ignore - EdgeRuntime.waitUntil available in Supabase Edge Functions
+    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+      EdgeRuntime.waitUntil(work);
       return jsonResp({
         success: true,
-        message: `Nightly builder batch ${batch} completed`,
-        batch,
-      });
-    } catch (e) {
-      console.error("Nightly builder execution error:", e);
-      return jsonResp({
-        success: false,
-        message: `Nightly builder batch ${batch} failed: ${e instanceof Error ? e.message : String(e)}`,
+        message: `Nightly builder batch ${batch} started in background`,
         batch,
       });
     }
+
+    // Fallback: await
+    await work;
+    return jsonResp({
+      success: true,
+      message: `Nightly builder batch ${batch} completed`,
+      batch,
+    });
   } catch (err) {
     console.error("Nightly builder handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);
