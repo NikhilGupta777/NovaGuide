@@ -11,7 +11,7 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // ── Optimal Model Strategy ────────────────────────────────────────────
 // Each model is chosen for its specific strength in the pipeline
-const MODEL_LITE = "gemini-2.5-flash"; // Cheapest: simple tasks (dup check)
+const MODEL_LITE = "gemini-2.5-flash-lite"; // Cheapest: simple tasks (dup check)
 const MODEL_RESEARCH = "gemini-2.5-flash"; // Stable grounding: research & fact-check
 const MODEL_FAST = "gemini-3-flash-preview"; // Smart + fast: outline, quality gate
 const MODEL_PRO = "gemini-3-pro-preview"; // Best quality: article writing
@@ -300,7 +300,7 @@ async function step3_outline(apiKey: string, topic: string, research: string): P
 
   const systemPrompt = `You are an expert content strategist. Based on the research notes, create a detailed article outline.
 
-The outline should follow this structure:
+The outline should follow this structure (follow this for all but in some cases you can also to the content best way):
 1. Hook / Introduction (grab attention, state the problem)
 2. Why This Matters (brief context)
 3. Step-by-Step Solution (the main content, 4-8 steps)
