@@ -89,6 +89,7 @@ async function callGemini(
       await delay(waitMs);
       return callGemini(apiKey, model, contents, tools, systemInstruction, retryCount + 1);
     }
+    if (resp.status === 429) throw { status: 429, message: `Rate limit on ${model} after ${retryCount + 1} attempts`, model };
     if (resp.status === 403) throw { status: 403, message: "Gemini API key invalid or quota exceeded." };
     throw new Error(`Gemini API returned ${resp.status}: ${txt}`);
   }
