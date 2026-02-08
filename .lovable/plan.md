@@ -1,171 +1,201 @@
 
 
-# Fix: True Fire-and-Forget Pipeline for Discover + Auto-Make
+# Deep Audit: Nightly Builder -- All Bugs, Missing Implementations, and Issues
 
-## The Problem
+## Summary
 
-Right now, even with both toggles enabled (Auto-Make + Auto-Publish), the pipeline is only **partially** server-side:
+After thoroughly analyzing the edge function (`ai-nightly-builder/index.ts`, 1003 lines), the frontend tab (`NightlyBuilderTab.tsx`, 547 lines), the database schema, and the cron job configuration, I found **11 bugs/issues** across 3 severity levels.
 
-1. The browser calls `ai-auto-discover` and **waits** for the full response (30-60 seconds)
-2. The browser receives topics, then **client-side** inserts them into `nightly_builder_queue`
-3. The browser **client-side** calls `ai-nightly-builder` to start batch generation
-4. Only then does the self-chaining batch run server-side
+---
 
-If you close the browser during steps 1-3, the batch never starts. The topics may be saved to `discover_runs` but they never get queued or generated.
+## CRITICAL Bugs (Will Prevent Cron From Working)
 
-## The Solution
+### 1. Cron Auth Mismatch -- Cron Sends Anon Key, But Function Expects Service Role Key
 
-Move the entire "discover -> queue -> generate" pipeline into the server. The browser just fires one call and walks away.
+The 3 cron jobs send the **anon key** in the `Authorization` header. But the edge function's auth logic (lines 910-934) does this:
 
 ```text
-Browser clicks "Find Topics" (with Auto-Make ON)
-    |
-    v
-Browser fires ai-auto-discover (with autoMake=true, autoPublish=true)
-Browser shows "Pipeline started" toast + starts polling discover_runs
-Browser can be CLOSED at this point
-    |
-    v
-ai-auto-discover (server-side):
-  1. Discovers topics via Gemini + Google Search
-  2. Saves topics to discover_runs table
-  3. IF autoMake=true:
-     - Inserts all topics into nightly_builder_queue (SERVER-SIDE)
-     - Calls ai-nightly-builder "start_manual_batch" (fire-and-forget)
-  4. Returns response (browser may or may not be there to receive it)
-    |
-    v
-ai-nightly-builder self-chains through all queue items (already works)
+1. Has auth header? Yes (anon key)
+2. Is token === service_role_key? No
+3. Try auth.getUser() with anon key -> FAILS (no user session)
+4. Return 401 Unauthorized
 ```
 
-## Changes
+**Result**: Every cron trigger will fail with 401. The nightly builder will never run automatically.
 
-### 1. Edge Function: `ai-auto-discover` -- Handle Full Pipeline Server-Side
+**Fix**: Either change the cron jobs to use the service role key, OR update the auth logic to recognize the anon key as a valid cron trigger.
 
-- Accept new parameters: `autoMake` (boolean) and `autoPublish` (boolean)
-- After discovering topics, if `autoMake` is true:
-  - Insert all topics directly into `nightly_builder_queue` using the service role client
-  - Fire-and-forget call to `ai-nightly-builder` with `{ action: "start_manual_batch", autoPublish }`
-- Update `discover_runs` status to include whether batch was triggered
+---
 
-### 2. Frontend: `AIAgentPanel.tsx` -- True Fire-and-Forget
+### 2. Edge Function Timeout During Research Phase
 
-- Pass `autoMake` and `autoPublish` flags to the `ai-auto-discover` edge function
-- Remove the client-side queue insertion code from `handleDiscover` (the edge function handles it now)
-- Remove the client-side `startServerBatch()` call from `handleDiscover` (the edge function handles it now)
-- After firing the edge function, immediately set `batchRunning = true` if `autoMake` is on (don't wait for the response)
-- The existing polling `useEffect` for `discover_runs` and `nightly_builder_queue` already handles progress updates -- no change needed there
-- When the discover run completes and `autoMake` was on, the batch polling will pick up the queue items automatically
+`runNightlyBuilder()` is called with `await` (line 988). Inside `runBatch1()`, it loops through ALL categories sequentially, calling `deepResearchCategory()` for each one. Each call takes ~5-10 seconds + a 3-second delay between categories.
 
-### 3. Frontend: On-Mount Batch Detection Fix
+With 10+ categories: **80-130+ seconds minimum**. Supabase edge functions typically timeout at ~60-150 seconds.
 
-- On page load, `fetchBatchQueue` already checks for `pending` and `processing` items
-- Add: also check `discover_runs` for any `running` discover run and resume polling for it
-- This ensures that if you come back after closing the browser, the UI correctly shows the batch is in progress
+The entire research phase (`Phase A` through `Phase E`) runs synchronously inside the HTTP request handler. It will timeout before completion, losing all work.
 
-## Files to Modify
+**Fix**: Make the research phase fire-and-forget using `EdgeRuntime.waitUntil()`, or split into a self-chaining pattern (research one category at a time).
 
-| File | What Changes |
-|------|-------------|
-| `supabase/functions/ai-auto-discover/index.ts` | Accept `autoMake`/`autoPublish` params; after discovery, insert queue items and trigger batch server-side |
-| `src/components/AIAgentPanel.tsx` | Pass `autoMake`/`autoPublish` to edge function; remove client-side queue insert + batch trigger from `handleDiscover`; set batch state immediately when autoMake is on |
+---
 
-## Technical Details
+### 3. `handleRunNow` Blocks the Browser
 
-### Edge function changes (`ai-auto-discover`):
+The frontend's `handleRunNow()` (line 184-214) awaits the edge function response:
+```typescript
+const { data, error } = await supabase.functions.invoke("ai-nightly-builder", {
+  body: { batch },
+});
+```
 
-After the existing topic discovery and `discover_runs` update (around line 221-228), add:
+For a nightly build that discovers topics across all categories, deduplicates, queues, and starts generation -- this can take 30+ minutes. The button stays stuck on "Running pipeline..." until the edge function times out or completes. This is not fire-and-forget.
+
+**Fix**: Fire the edge function without awaiting, show a "triggered" toast, and rely on polling to track progress (the polling is already partially implemented).
+
+---
+
+## HIGH Severity Bugs
+
+### 4. No Parallelism in Nightly Batch Generation
+
+The manual batch (from AIAgentPanel) launches 3 parallel chains (line 971-977). But the nightly batch generation fires only ONE chain (line 557):
 
 ```typescript
-// If autoMake is enabled, handle queue + batch trigger server-side
-if (autoMake && result.topics?.length > 0) {
-  const insertRows = result.topics.map(t => ({
-    topic: t.topic,
-    category_id: t.category_id || null,
-    priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
-    status: "pending",
-  }));
+selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
+```
 
-  // Insert into queue
-  await db.from("nightly_builder_queue").insert(insertRows);
+With 100+ topics per batch, processing one-at-a-time (~2 min each) would take **3+ hours per batch**. It should use the same parallel pattern as the manual batch.
 
-  // Fire-and-forget: trigger batch generation
-  const batchUrl = `${SUPABASE_URL}/functions/v1/ai-nightly-builder`;
-  fetch(batchUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    },
-    body: JSON.stringify({ action: "start_manual_batch", autoPublish }),
-  }).catch(err => console.error("Failed to trigger batch:", err));
+**Fix**: Launch multiple parallel chains for nightly generation, similar to `start_manual_batch`.
+
+---
+
+### 5. `next_run_at` is Never Set
+
+The `nightly_builder_settings` table has a `next_run_at` column, and the UI displays it when available (line 351). But **nothing ever writes to it** -- not the cron job, not `runNightlyBuilder()`, not the frontend. It's always `null`.
+
+**Fix**: After each completed run, calculate and set `next_run_at` based on the cron schedule (next occurrence of 12AM/12PM/6PM IST).
+
+---
+
+### 6. Stale Run Cleanup is Too Aggressive
+
+The frontend (lines 123-129) marks any run in "researching", "generating", or "pending" status as "failed" if `started_at` is older than 10 minutes:
+
+```typescript
+const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+await supabase.from("nightly_builder_runs").update({
+  status: "failed",
+  error_message: "Timed out..."
+}).in("status", ["researching", "generating", "pending"])
+  .lt("started_at", tenMinAgo);
+```
+
+A legitimate nightly run with 100+ articles takes **hours**. Opening the admin page during a run will kill it by marking it as "failed". The self-chaining generation will keep going, but the run status becomes incorrect.
+
+**Fix**: Increase timeout to 6+ hours, or use `updated_at` instead of `started_at`, updating `nightly_builder_runs` after each article is generated.
+
+---
+
+### 7. Rate Limit Retry Has No Max Depth (Infinite Recursion Risk)
+
+Both `deepResearchCategory()` (line 114) and `callGeminiFlash()` (line 187) recursively retry on 429 errors with no attempt counter:
+
+```typescript
+if (resp.status === 429) {
+  await delay(30000);
+  return deepResearchCategory(...); // infinite recursion!
 }
 ```
 
-### Frontend changes (`AIAgentPanel.tsx`):
+If the Gemini API rate-limits persistently, this creates infinite recursion until the function crashes or times out.
 
-The `handleDiscover` function becomes:
+**Fix**: Add a `maxRetries` parameter (e.g., 3) and fail after exhausting retries.
+
+---
+
+## MEDIUM Severity Issues
+
+### 8. `addToQueue` Doesn't Explicitly Set `run_date: null`
+
+The `addToQueue` function in `AIAgentPanel.tsx` (line 470-475) inserts queue items without specifying `run_date`:
 
 ```typescript
-const handleDiscover = async () => {
-  setDiscovering(true);
-  setDiscoveredTopics([]);
-
-  const { data: runData } = await supabase
-    .from("discover_runs")
-    .insert({ status: "running", topic_count: discoverCount })
-    .select("id")
-    .single();
-  const runId = runData?.id;
-  if (runId) setDiscoverRunId(runId);
-
-  // If autoMake is on, set batch state immediately
-  if (autoMake) {
-    setBatchRunning(true);
-    setBatchTotal(discoverCount);
-  }
-
-  try {
-    // Pass autoMake and autoPublish to edge function
-    // The edge function handles queue insertion + batch trigger server-side
-    const { data, error } = await supabase.functions.invoke("ai-auto-discover", {
-      body: { count: discoverCount, targetCategories: [], discoverRunId: runId, autoMake, autoPublish },
-    });
-    if (error) throw error;
-    const topics = data?.topics || [];
-    setDiscoveredTopics(topics);
-    setDiscoverRunId(null);
-    setDiscovering(false);
-
-    if (autoMake && topics.length > 0) {
-      setBatchTotal(topics.length);
-      setBatchQueue(topics);
-      toast({ title: "Pipeline Active", description: `${topics.length} topics queued -- generating in background.` });
-    } else {
-      toast({ title: "Topics Discovered!", description: `Found ${topics.length} topics.` });
-    }
-  } catch (err) {
-    // Even if the browser loses connection, the edge function continues server-side
-    // The polling will pick up the results
-    if (autoMake) {
-      toast({ title: "Pipeline Started", description: "Running in background. Check back for progress." });
-    } else {
-      const msg = err instanceof Error ? err.message : "Discovery failed";
-      setDiscovering(false);
-      setDiscoverRunId(null);
-      toast({ title: "Error", description: msg, variant: "destructive" });
-    }
-  }
-};
+await supabase.from("nightly_builder_queue").insert({
+  topic: topic.topic,
+  category_id: topic.category_id || null,
+  priority: ...,
+  status: "pending",
+  // run_date not specified!
+});
 ```
 
-Key difference: even if the `supabase.functions.invoke` call fails (e.g., browser closes during the 30-60s discovery), the edge function is already running server-side and will complete the full pipeline. The `catch` block now handles this gracefully when `autoMake` is on.
+The column default is `CURRENT_DATE`. This means manually-added items will get today's date, NOT null. The manual batch processor filters by `run_date IS NULL`, so these items would be **invisible** to it.
 
-## What This Means
+Currently, all 40 existing items have `null` run_date (likely inserted via `ai-auto-discover` which explicitly sets `run_date: null`). But any item added via the "Add to Queue" button in the UI will be lost.
 
-- Click "Find Topics" with both toggles on -- one click
-- Close the browser immediately
-- The server discovers topics, queues them, and generates all articles
-- Come back whenever -- articles are done
-- The UI polls the database for progress if you stay on the page
+**Fix**: Explicitly set `run_date: null` and `batch_number: null` in the insert.
+
+---
+
+### 9. Nightly Generation Uses Different Action Name Than Manual
+
+Nightly batch generation uses `action: "generate_one"` with `runId`, `batch`, `runDate` params (line 557, 941-944). Manual batch uses `action: "generate_manual_batch"` with `autoPublish` (line 948-951).
+
+They're separate code paths with different features:
+- Nightly `generate_one`: single chain, run-based progress tracking, quality-gate auto-publish
+- Manual `generate_manual_batch`: parallel chains, stale recovery, simple auto-publish
+
+The nightly path is missing: stale recovery, parallel chains, atomic claiming.
+The manual path is missing: run-based progress tracking, quality-gate thresholds.
+
+**Fix**: Unify these two generation paths, or add missing features to each.
+
+---
+
+### 10. `last_run_at` Only Updates for Cron-Triggered Runs, Not Manual "Run Now"
+
+`last_run_at` is updated inside `runNightlyBuilder()` (line 252-254). Since the cron auth is broken (Bug 1), it has never been set. But even when fixed, the "Run Now" button calls the same function, so it will update on manual runs too. However, if the function times out (Bug 2), the update may never happen.
+
+This is a cascading issue from Bugs 1 and 2.
+
+---
+
+### 11. 1 Item Still Stuck in "processing" Status
+
+The database shows 1 item stuck in "processing" from a previous crashed chain:
+
+```
+pending: 4, processing: 1, completed: 35
+```
+
+The stale recovery (`recoverStaleManualItems`) runs at the start of `generateOneFromManualQueue`, but it only runs when that function is called. Since no batch is currently running, this item stays stuck.
+
+**Fix**: Add on-load stale recovery in the frontend, or run recovery on cron/startup.
+
+---
+
+## Implementation Plan
+
+### File Changes
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/ai-nightly-builder/index.ts` | Fix auth to accept anon key for cron; use `EdgeRuntime.waitUntil()` for research phase; add parallel chains for nightly generation; add max retry limits; add stale recovery for nightly items |
+| `src/components/NightlyBuilderTab.tsx` | Make `handleRunNow` fire-and-forget; fix stale cleanup timeout (10 min -> 6 hours); calculate and display `next_run_at` |
+| `src/components/AIAgentPanel.tsx` | Add `run_date: null, batch_number: null` to `addToQueue` insert |
+| Database migration | Update cron jobs to use service role key instead of anon key |
+
+### Priority Order
+
+1. Fix cron auth (Bug 1) -- without this, nothing works
+2. Fix edge function timeout (Bug 2) -- without this, Run Now crashes
+3. Fix handleRunNow blocking (Bug 3) -- UX is broken
+4. Fix addToQueue missing null (Bug 8) -- items silently lost
+5. Add parallel chains to nightly gen (Bug 4) -- 3x speed
+6. Fix stale cleanup timeout (Bug 6) -- stops killing active runs
+7. Add retry limits (Bug 7) -- prevents infinite loops
+8. Set next_run_at (Bug 5) -- display fix
+9. Recover stuck processing item (Bug 11) -- data cleanup
+10. Unify generation paths (Bug 9) -- code quality
 
