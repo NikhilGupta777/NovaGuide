@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -258,7 +260,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
               "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
             },
             body: JSON.stringify({ action: "start_manual_batch", autoPublish }),
-          }).then(resp => {
+          }).then(async (resp) => {
+            await resp.text(); // Consume response body to prevent resource leak
             console.log("Batch trigger response:", resp.status);
           }).catch(err => {
             console.error("Failed to trigger batch:", err);
