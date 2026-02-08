@@ -325,28 +325,54 @@ const AskAISection = () => {
 const MarkdownLite = ({ content }: { content: string }) => {
   const lines = content.split("\n");
 
+  const renderInline = (text: string): React.ReactNode[] => {
+    const parts: React.ReactNode[] = [];
+    const regex = /(\*\*[^*]+\*\*|\*[^*]+\*|\[([^\]]+)\]\((\/article\/[^\)]+)\))/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(text.slice(lastIndex, match.index));
+      }
+      const token = match[0];
+      if (token.startsWith("**") && token.endsWith("**")) {
+        parts.push(<strong key={match.index} className="font-semibold text-foreground">{token.slice(2, -2)}</strong>);
+      } else if (token.startsWith("*") && token.endsWith("*")) {
+        parts.push(<em key={match.index} className="text-muted-foreground">{token.slice(1, -1)}</em>);
+      } else if (token.startsWith("[")) {
+        const linkMatch = token.match(/\[([^\]]+)\]\((\/article\/[^\)]+)\)/);
+        if (linkMatch) {
+          parts.push(
+            <Link key={match.index} to={linkMatch[2]} className="text-primary hover:underline font-medium">
+              {linkMatch[1]}
+            </Link>
+          );
+        }
+      }
+      lastIndex = match.index + token.length;
+    }
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+    return parts.length ? parts : [text];
+  };
+
   return (
     <div className="text-sm text-foreground/90 space-y-1.5 leading-relaxed">
       {lines.map((line, i) => {
-        const boldLine = line.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-foreground">$1</strong>');
-        const italicLine = boldLine.replace(/\*(.*?)\*/g, '<em class="text-muted-foreground">$1</em>');
-        const linkedLine = italicLine.replace(
-          /\[(.*?)\]\((\/article\/[^\)]+)\)/g,
-          '<a href="$2" class="text-primary hover:underline font-medium">$1</a>'
-        );
-
         if (line.trim().startsWith("- ") || line.trim().startsWith("• ")) {
           return (
             <div key={i} className="pl-3 flex gap-1.5">
               <span className="text-primary mt-0.5">•</span>
-              <span dangerouslySetInnerHTML={{ __html: linkedLine.replace(/^[-•]\s*/, "") }} />
+              <span>{renderInline(line.replace(/^[-•]\s*/, "").trim())}</span>
             </div>
           );
         }
 
         if (line.trim() === "") return <div key={i} className="h-1" />;
 
-        return <p key={i} dangerouslySetInnerHTML={{ __html: linkedLine }} />;
+        return <p key={i}>{renderInline(line)}</p>;
       })}
     </div>
   );
