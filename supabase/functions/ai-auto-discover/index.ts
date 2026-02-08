@@ -1,8 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -20,7 +18,6 @@ async function callGemini(
   tools?: unknown[],
   systemInstruction?: string,
   toolConfig?: unknown,
-  retryCount = 0
 ) {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
   const body: Record<string, unknown> = { contents, generation_config: { temperature: 0.8 } };
@@ -28,7 +25,7 @@ async function callGemini(
   if (systemInstruction) body.system_instruction = { parts: [{ text: systemInstruction }] };
   if (toolConfig) body.tool_config = toolConfig;
 
-  console.log(`Calling Gemini model: ${model} (attempt ${retryCount + 1}), tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : 'none'}`);
+  console.log(`Calling Gemini model: ${model}, tools: ${tools ? JSON.stringify(Object.keys(tools[0] || {})) : "none"}`);
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -38,13 +35,7 @@ async function callGemini(
   if (!resp.ok) {
     const txt = await resp.text();
     console.error("Gemini API error:", resp.status, txt);
-    if (resp.status === 429 && retryCount < 3) {
-      const waitMs = 15000 + Math.random() * 15000;
-      console.log(`Rate limited (attempt ${retryCount + 1}/3), waiting ${Math.round(waitMs / 1000)}s...`);
-      await new Promise(r => setTimeout(r, waitMs));
-      return callGemini(apiKey, model, contents, tools, systemInstruction, toolConfig, retryCount + 1);
-    }
-    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded after retries." };
+    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Try again later." };
     throw new Error(`Gemini API returned ${resp.status}: ${txt.slice(0, 200)}`);
   }
   return resp.json();
@@ -53,7 +44,7 @@ async function callGemini(
 function extractText(response: Record<string, unknown>): string {
   const candidates = response.candidates as { content: { parts: { text?: string }[] } }[];
   if (!candidates?.[0]?.content?.parts) return "";
-  return candidates[0].content.parts.map(p => p.text || "").join("");
+  return candidates[0].content.parts.map((p) => p.text || "").join("");
 }
 
 serve(async (req) => {
@@ -80,7 +71,10 @@ serve(async (req) => {
     const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
       global: { headers: { Authorization: authHeader } },
     });
-    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    const {
+      data: { user },
+      error: userError,
+    } = await userClient.auth.getUser();
     if (userError || !user) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
@@ -89,7 +83,12 @@ serve(async (req) => {
     }
 
     const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: roleData } = await db.from("user_roles").select("role").eq("user_id", user.id).eq("role", "admin").maybeSingle();
+    const { data: roleData } = await db
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", user.id)
+      .eq("role", "admin")
+      .maybeSingle();
     if (!roleData) {
       return new Response(JSON.stringify({ error: "Admin access required" }), {
         status: 403,
@@ -110,9 +109,10 @@ serve(async (req) => {
 
     const categoryList = categories.map((c) => `${c.name} (ID: ${c.id}): ${c.description || "General"}`).join("\n");
     const existingTitles = existingArticles.map((a) => `- ${a.title}`).join("\n");
-    const targetCatFilter = targetCategories.length > 0
-      ? `Focus on these categories: ${targetCategories.map((id: string) => categories.find((c) => c.id === id)?.name || id).join(", ")}`
-      : "Cover a variety of categories";
+    const targetCatFilter =
+      targetCategories.length > 0
+        ? `Focus on these categories: ${targetCategories.map((id: string) => categories.find((c) => c.id === id)?.name || id).join(", ")}`
+        : "Cover a variety of categories";
 
     console.log("Auto-discover: Finding trending topics with Google Search grounding, count:", count);
 
@@ -128,11 +128,22 @@ Provide a detailed list of ${count} specific, actionable topics that would make 
 - Which category it fits best
 - Related search keywords`;
 
-    const searchResp = await callGemini(GEMINI_API_KEY, MODEL_RESEARCH, [
-      { role: "user", parts: [{ text: `Search the web and discover ${count} trending tech help topics that would attract organic search traffic. Look at what people are actually searching for and asking about right now. Be specific and actionable.` }] }
-    ], [
-      { google_search: {} }
-    ], searchSystemPrompt);
+    const searchResp = await callGemini(
+      GEMINI_API_KEY,
+      MODEL_RESEARCH,
+      [
+        {
+          role: "user",
+          parts: [
+            {
+              text: `Search the web and discover ${count} trending tech help topics that would attract organic search traffic. Look at what people are actually searching for and asking about right now. Be specific and actionable.`,
+            },
+          ],
+        },
+      ],
+      [{ google_search: {} }],
+      searchSystemPrompt,
+    );
 
     const searchResults = extractText(searchResp);
     console.log("Search results length:", searchResults.length);
@@ -176,9 +187,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
     };
 
     console.log(`Calling Gemini model: ${MODEL_PARSE}, mode: JSON output`);
-    
+
     let result: { topics: unknown[] } = { topics: [] };
-    
+
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const parseResp = await fetch(parseUrl, {
@@ -191,7 +202,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
           const errText = await parseResp.text();
           console.error(`Parse attempt ${attempt + 1} API error:`, parseResp.status, errText.slice(0, 300));
           if (attempt === 0) {
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 2000));
             continue;
           }
           break;
@@ -200,7 +211,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         const parseData = await parseResp.json();
         const text = extractText(parseData);
         console.log(`Parse attempt ${attempt + 1}: text length ${text.length}`);
-        
+
         if (text.length > 0) {
           try {
             const parsed = JSON.parse(text);
@@ -213,14 +224,14 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             console.error(`Parse attempt ${attempt + 1}: JSON parse error`, (e as Error).message);
           }
         }
-        
+
         if (attempt === 0) {
           console.log("Retrying parse step...");
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (e) {
         console.error(`Parse attempt ${attempt + 1} error:`, (e as Error).message);
-        if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 2000));
       }
     }
 
@@ -228,12 +239,15 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
     // Persist results to discover_runs table
     if (discoverRunId) {
-      await db.from("discover_runs").update({
-        status: "completed",
-        topics: result.topics || [],
-        topic_count: result.topics?.length || 0,
-        completed_at: new Date().toISOString(),
-      }).eq("id", discoverRunId);
+      await db
+        .from("discover_runs")
+        .update({
+          status: "completed",
+          topics: result.topics || [],
+          topic_count: result.topics?.length || 0,
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", discoverRunId);
       console.log("Updated discover_run:", discoverRunId);
     }
 
@@ -246,8 +260,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         category_id: t.category_id || null,
         priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
         status: "pending",
-        run_date: null,      // Must be null — generateOneFromManualQueue filters by run_date IS NULL
-        batch_number: null,  // Must be null — DB default is 1 which would route to nightly flow
+        run_date: null, // Must be null — generateOneFromManualQueue filters by run_date IS NULL
+        batch_number: null, // Must be null — DB default is 1 which would route to nightly flow
       }));
 
       const { error: queueError } = await db.from("nightly_builder_queue").insert(insertRows);
@@ -264,15 +278,16 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
             },
             body: JSON.stringify({ action: "start_manual_batch", autoPublish }),
-          }).then(async (resp) => {
-            await resp.text(); // Consume response body to prevent resource leak
-            console.log("Batch trigger response:", resp.status);
-          }).catch(err => {
-            console.error("Failed to trigger batch:", err);
           })
+            .then((resp) => {
+              console.log("Batch trigger response:", resp.status);
+            })
+            .catch((err) => {
+              console.error("Failed to trigger batch:", err);
+            }),
         );
       }
     }
@@ -281,13 +296,19 @@ Return ONLY valid JSON, no markdown, no explanation.`;
     await db.from("agent_logs").insert({
       action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)${batchTriggered ? " + batch triggered" : ""}`,
       status: "completed",
-      details: { topics: result.topics, mode: "auto_discover", autoMake, autoPublish, batchTriggered, models: { research: MODEL_RESEARCH, parse: MODEL_PARSE } },
+      details: {
+        topics: result.topics,
+        mode: "auto_discover",
+        autoMake,
+        autoPublish,
+        batchTriggered,
+        models: { research: MODEL_RESEARCH, parse: MODEL_PARSE },
+      },
     });
 
     return new Response(JSON.stringify({ ...result, batchTriggered }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-
   } catch (error) {
     console.error("Auto-discover error:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -297,16 +318,24 @@ Return ONLY valid JSON, no markdown, no explanation.`;
     try {
       const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
       const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-      const body = await req.clone().json().catch(() => ({}));
+      const body = await req
+        .clone()
+        .json()
+        .catch(() => ({}));
       if (body.discoverRunId) {
         const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-        await db.from("discover_runs").update({
-          status: "failed",
-          error_message: message,
-          completed_at: new Date().toISOString(),
-        }).eq("id", body.discoverRunId);
+        await db
+          .from("discover_runs")
+          .update({
+            status: "failed",
+            error_message: message,
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", body.discoverRunId);
       }
-    } catch (_) { /* best effort */ }
+    } catch (_) {
+      /* best effort */
+    }
 
     return new Response(JSON.stringify({ error: message }), {
       status,

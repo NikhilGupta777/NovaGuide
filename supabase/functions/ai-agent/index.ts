@@ -11,7 +11,7 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // ── Optimal Model Strategy ────────────────────────────────────────────
 // Each model is chosen for its specific strength in the pipeline
-const MODEL_LITE = "gemini-2.5-flash-lite"; // Cheapest: simple tasks (dup check)
+const MODEL_LITE = "gemini-2.5-flash"; // Cheapest: simple tasks (dup check)
 const MODEL_RESEARCH = "gemini-2.5-flash"; // Stable grounding: research & fact-check
 const MODEL_FAST = "gemini-3-flash-preview"; // Smart + fast: outline, quality gate
 const MODEL_PRO = "gemini-3-pro-preview"; // Best quality: article writing
@@ -62,7 +62,6 @@ async function callGemini(
   contents: unknown[],
   tools?: unknown[],
   systemInstruction?: string,
-  retryCount = 0,
 ) {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
@@ -73,7 +72,7 @@ async function callGemini(
   }
   body.generationConfig = { temperature: 0.7 };
 
-  console.log(`Calling Gemini model: ${model} (attempt ${retryCount + 1})`);
+  console.log(`Calling Gemini model: ${model}`);
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -83,13 +82,7 @@ async function callGemini(
   if (!resp.ok) {
     const txt = await resp.text();
     console.error(`Gemini API error (${model}):`, resp.status, txt);
-    if (resp.status === 429 && retryCount < 3) {
-      const waitMs = 15000 + Math.random() * 15000; // 15-30s randomized backoff
-      console.log(`Rate limited on ${model} (attempt ${retryCount + 1}/3), waiting ${Math.round(waitMs / 1000)}s...`);
-      await delay(waitMs);
-      return callGemini(apiKey, model, contents, tools, systemInstruction, retryCount + 1);
-    }
-    if (resp.status === 429) throw { status: 429, message: `Rate limit on ${model} after ${retryCount + 1} attempts`, model };
+    if (resp.status === 429) throw { status: 429, message: `Rate limit on ${model}`, model };
     if (resp.status === 403) throw { status: 403, message: "Gemini API key invalid or quota exceeded." };
     throw new Error(`Gemini API returned ${resp.status}: ${txt}`);
   }
@@ -193,7 +186,7 @@ YOUR JOB: Only flag TRUE duplicates — articles that are essentially the SAME a
 CRITICAL RULES:
 - Different titles that serve different user search queries = ALWAYS allow. Users search different phrases and each title captures different traffic.
 - Two or three articles on a similar broad topic but written differently, with different titles, different structure, or slightly different focus = NOT duplicates. These are VALUABLE because they serve different readers.
-- The ONLY duplicate is when the title is nearly word-for-word identical AND the step-by-step content would be 90%+ the same instructions in the same order.
+- The ONLY duplicate is when the title is nearly word-for-word identical AND the step-by-step content would be 95%+ the same instructions in the same order.
 - "Slow internet fixes" vs "Internet not working troubleshooting" → NOT duplicate (different problems)
 - "Clear Chrome cache" vs "Clear browser cache" → NOT duplicate (different scope, different search intent)
 - "How to fix Wi-Fi" vs "How to Fix Wi-Fi" → DUPLICATE (same title, same content)
@@ -718,7 +711,7 @@ serve(async (req) => {
       .from("articles")
       .select("title")
       .order("created_at", { ascending: false })
-      .limit(1000);
+      .limit(200);
 
     const existingTitles = (existingArticles || []).map((a) => a.title);
 
@@ -775,7 +768,7 @@ serve(async (req) => {
         console.log("Duplicate check skipped (force retry)");
       }
 
-      await delay(2000 + Math.random() * 3000); // 2-5s randomized to avoid burst
+      await delay(2000);
 
       // STEP 2: Deep Web Research with Google Search Grounding (2.5 Flash)
       await updateRunStatus(db, runId, "researching", 2);
@@ -788,28 +781,28 @@ serve(async (req) => {
         })
         .eq("id", runId);
 
-      await delay(3000 + Math.random() * 3000); // 3-6s randomized
+      await delay(3000);
 
       // STEP 3: Generate Outline (3 Flash)
       await updateRunStatus(db, runId, "outlining", 3);
       const outline = await step3_outline(GEMINI_API_KEY, topic, research);
       await db.from("agent_runs").update({ generated_outline: outline }).eq("id", runId);
 
-      await delay(3000 + Math.random() * 3000);
+      await delay(3000);
 
       // STEP 4: Write Article (3 Pro → fallback to 3 Flash)
       await updateRunStatus(db, runId, "writing", 4);
       const { data: categories } = await db.from("categories").select("id, name, slug").order("sort_order");
       let article = await step4_write(GEMINI_API_KEY, topic, research, outline, categories || [], sources, categoryId);
 
-      await delay(3000 + Math.random() * 3000);
+      await delay(3000);
 
       // STEP 5: Fact Verification with Grounding (2.5 Flash)
       await updateRunStatus(db, runId, "verifying", 5);
       const factCheck = await step5_factCheck(GEMINI_API_KEY, article);
       await db.from("agent_runs").update({ factual_score: factCheck.factualScore }).eq("id", runId);
 
-      await delay(3000 + Math.random() * 3000);
+      await delay(3000);
 
       // STEP 6: Quality Gate + SEO (3 Flash)
       await updateRunStatus(db, runId, "optimizing", 6);
@@ -818,7 +811,7 @@ serve(async (req) => {
       // Auto-retry if quality < 7
       if (qualityResult.qualityScore < 7) {
         console.log(`Quality score ${qualityResult.qualityScore}/10 — rewriting with Pro...`);
-        await delay(3000 + Math.random() * 3000);
+        await delay(3000);
         article = await rewriteArticle(GEMINI_API_KEY, article, qualityResult.reviewNotes, research, categories || []);
         qualityResult = await step6_qualityGate(GEMINI_API_KEY, article, factCheck.factualScore);
       }

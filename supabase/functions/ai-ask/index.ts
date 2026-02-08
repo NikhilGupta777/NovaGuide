@@ -11,10 +11,7 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODEL = "gemini-2.5-flash";
 
 function serviceClient() {
-  return createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 }
 
 function extractText(response: Record<string, unknown>): string {
@@ -49,18 +46,18 @@ serve(async (req) => {
     // Rate limiting by IP
     const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
     if (!checkRateLimit(clientIp)) {
-      return new Response(
-        JSON.stringify({ error: "Too many requests. Please wait a moment before trying again." }),
-        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "Too many requests. Please wait a moment before trying again." }), {
+        status: 429,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const { question, conversationHistory } = await req.json();
     if (!question || typeof question !== "string" || question.trim().length < 3) {
-      return new Response(
-        JSON.stringify({ error: "Please provide a valid question (at least 3 characters)." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "Please provide a valid question (at least 3 characters)." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const trimmedQuestion = question.trim().slice(0, 500);
@@ -77,10 +74,10 @@ serve(async (req) => {
       : [];
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
     if (!GEMINI_API_KEY) {
-      return new Response(
-        JSON.stringify({ error: "AI service not configured." }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "AI service not configured." }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const db = serviceClient();
@@ -92,7 +89,8 @@ serve(async (req) => {
       .filter((w) => w.length > 2)
       .slice(0, 8);
 
-    let matchedArticles: { id: string; title: string; slug: string; excerpt: string | null; content: string | null }[] = [];
+    let matchedArticles: { id: string; title: string; slug: string; excerpt: string | null; content: string | null }[] =
+      [];
 
     if (searchTerms.length > 0) {
       // Search using ilike for each significant word
@@ -114,17 +112,21 @@ serve(async (req) => {
     }
 
     // ── Step 2: Use AI to rank relevance and generate answer ────────────
-    const articleContext = matchedArticles.length > 0
-      ? matchedArticles
-          .map((a, i) => `[Article ${i + 1}] Title: "${a.title}" | Slug: ${a.slug} | Excerpt: ${a.excerpt || "N/A"} | Content Preview: ${(a.content || "").substring(0, 500)}`)
-          .join("\n\n")
-      : "No articles found in the database.";
+    const articleContext =
+      matchedArticles.length > 0
+        ? matchedArticles
+            .map(
+              (a, i) =>
+                `[Article ${i + 1}] Title: "${a.title}" | Slug: ${a.slug} | Excerpt: ${a.excerpt || "N/A"} | Content Preview: ${(a.content || "").substring(0, 500)}`,
+            )
+            .join("\n\n")
+        : "No articles found in the database.";
 
     const systemPrompt = `You are a helpful AI assistant for DigitalHelp, a beginner-friendly tech help website.
 
 Your job is to answer the user's tech question following these rules:
 
-1. FIRST, check if any of the provided articles from our database are relevant to the user's question.
+1. FIRST, check if any of the provided articles from our database are relevant to the user's question (any similat most matching).
 2. If relevant articles exist:
    - Provide a brief, helpful 2-3 line summary answering their question
    - Recommend the relevant article(s) with the format: **📖 Read more:** [Article Title](/article/slug-here)
@@ -132,7 +134,7 @@ Your job is to answer the user's tech question following these rules:
 3. If NO relevant articles exist in the database:
    - Answer the question from your own knowledge clearly and helpfully
    - Keep answers beginner-friendly, concise, and actionable
-   - At the end add: "💡 *We don't have a detailed guide on this topic yet, but we're working on creating one!*"
+   - At the end add: "💡 *We don't have a detailed guide on this topic yet, but our AI engine has started working on it! Check back soon.!*"
    - Set the "shouldCreateArticle" field to true
 
 IMPORTANT FORMATTING:
@@ -201,15 +203,15 @@ Analyze the question and articles, then respond in the required JSON format.${
       const errText = await resp.text();
       console.error("Gemini API error:", resp.status, errText);
       if (resp.status === 429) {
-        return new Response(
-          JSON.stringify({ error: "Our AI is currently busy. Please try again in a moment." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return new Response(JSON.stringify({ error: "Our AI is currently busy. Please try again in a moment." }), {
+          status: 429,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
-      return new Response(
-        JSON.stringify({ error: "AI service temporarily unavailable." }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "AI service temporarily unavailable." }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const geminiData = await resp.json();
@@ -243,7 +245,9 @@ Analyze the question and articles, then respond in the required JSON format.${
       const { data: existingRuns } = await db
         .from("agent_runs")
         .select("id")
-        .or(`status.eq.checking,status.eq.researching,status.eq.outlining,status.eq.writing,status.eq.verifying,status.eq.optimizing`)
+        .or(
+          `status.eq.checking,status.eq.researching,status.eq.outlining,status.eq.writing,status.eq.verifying,status.eq.optimizing`,
+        )
         .ilike("topic", `%${topic.slice(0, 50)}%`)
         .limit(1);
 
@@ -259,11 +263,10 @@ Analyze the question and articles, then respond in the required JSON format.${
             Authorization: `Bearer ${serviceKey}`,
           },
           body: JSON.stringify({
+            action: "generate",
             topic: topic,
           }),
-        })
-          .then((r) => r.text()) // Consume response body to prevent resource leak
-          .catch((err) => console.error("Failed to trigger article generation:", err));
+        }).catch((err) => console.error("Failed to trigger article generation:", err));
       } else {
         console.log(`Skipping article generation - already running for similar topic: "${topic}"`);
       }
@@ -276,13 +279,13 @@ Analyze the question and articles, then respond in the required JSON format.${
         recommendedArticles: parsed.recommendedArticles || [],
         articleGenerationTriggered: parsed.shouldCreateArticle && !!parsed.suggestedTopic,
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (err) {
     console.error("ai-ask error:", err);
-    return new Response(
-      JSON.stringify({ error: err instanceof Error ? err.message : "Something went wrong." }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ error: err instanceof Error ? err.message : "Something went wrong." }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });
