@@ -103,7 +103,70 @@ export default function ContentAuditTab() {
     if (count !== null) setTotalArticles(count);
   }, []);
 
-  // Initial load + cleanup stale runs
+  // Fix all for a specific run — resumable, persisted in DB
+  const triggerFixAllForRun = useCallback(async (runId: string) => {
+    // Mark run as "fixing" in DB so we can resume after refresh
+    await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixing" }).eq("id", runId);
+
+    const { data: findingsData } = await supabase
+      .from("content_audit_findings")
+      .select("*")
+      .eq("run_id", runId)
+      .neq("status", "resolved")
+      .not("article_id", "is", null)
+      .not("suggestion", "is", null);
+
+    const fixable = (findingsData || []) as unknown as AuditFinding[];
+    if (fixable.length === 0) {
+      await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixed" }).eq("id", runId);
+      toast({ title: "Fix All Complete", description: "No more issues to fix." });
+      setFixingAll(false);
+      setFixAllProgress("");
+      return;
+    }
+
+    setFixingAll(true);
+    let fixed = 0;
+    let failed = 0;
+    for (const finding of fixable) {
+      // Re-check if still open (might have been fixed already)
+      const { data: current } = await supabase
+        .from("content_audit_findings")
+        .select("status")
+        .eq("id", finding.id)
+        .single();
+      if (current?.status === "resolved") {
+        fixed++;
+        continue;
+      }
+
+      setFixAllProgress(`Fixing ${fixed + failed + 1}/${fixable.length}...`);
+      try {
+        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+          body: { action: "apply_fix", findingId: finding.id },
+        });
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        fixed++;
+        fetchFindings(runId);
+      } catch {
+        failed++;
+      }
+    }
+
+    // Mark as completed
+    await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixed" }).eq("id", runId);
+
+    toast({
+      title: "Fix All Complete",
+      description: `Fixed ${fixed} of ${fixable.length} issues${failed > 0 ? ` (${failed} failed)` : ""}.`,
+    });
+    setFixingAll(false);
+    setFixAllProgress("");
+    fetchRuns();
+  }, [toast, fetchFindings, fetchRuns]);
+
+  // Initial load + cleanup stale runs + resume fix-all
   useEffect(() => {
     const init = async () => {
       await fetchTotalArticles();
@@ -118,9 +181,23 @@ export default function ContentAuditTab() {
         .lt("started_at", tenMinAgo);
 
       await fetchRuns();
+
+      // Resume fix-all if it was in progress
+      const { data: fixingRun } = await (supabase.from("content_audit_runs") as any)
+        .select("id")
+        .eq("fix_all_status", "fixing")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (fixingRun) {
+        setSelectedRunId(fixingRun.id);
+        triggerFixAllForRun(fixingRun.id);
+      }
     };
     init();
-  }, [fetchRuns, fetchTotalArticles]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (selectedRunId) fetchFindings(selectedRunId);
@@ -154,11 +231,9 @@ export default function ContentAuditTab() {
 
       if (data?.success) {
         toast({ title: "Content Audit Complete", description: data.message || "All articles scanned." });
-        // Refresh to get latest findings
         await fetchRuns();
         // Auto-fix all remaining issues if enabled
         if (autoFixAll) {
-          // Wait for findings to load for the latest run
           const { data: latestRun } = await supabase
             .from("content_audit_runs")
             .select("id")
@@ -167,9 +242,7 @@ export default function ContentAuditTab() {
             .maybeSingle();
           if (latestRun) {
             setSelectedRunId(latestRun.id);
-            await fetchFindings(latestRun.id);
-            // Small delay to let state update
-            setTimeout(() => triggerFixAllForRun(latestRun.id), 500);
+            triggerFixAllForRun(latestRun.id);
           }
         }
       } else {
@@ -184,48 +257,6 @@ export default function ContentAuditTab() {
       fetchRuns();
       if (selectedRunId) fetchFindings(selectedRunId);
     }
-  };
-
-  // Fix all for a specific run (used by auto-fix-all after scan)
-  const triggerFixAllForRun = async (runId: string) => {
-    const { data: findingsData } = await supabase
-      .from("content_audit_findings")
-      .select("*")
-      .eq("run_id", runId)
-      .neq("status", "resolved")
-      .not("article_id", "is", null)
-      .not("suggestion", "is", null);
-    
-    const fixable = (findingsData || []) as unknown as AuditFinding[];
-    if (fixable.length === 0) {
-      toast({ title: "Auto-Fix Complete", description: "No additional issues to fix." });
-      return;
-    }
-    
-    setFixingAll(true);
-    let fixed = 0;
-    let failed = 0;
-    for (const finding of fixable) {
-      setFixAllProgress(`Auto-fixing ${fixed + 1}/${fixable.length}...`);
-      try {
-        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
-          body: { action: "apply_fix", findingId: finding.id },
-        });
-        if (error) throw error;
-        if (data?.error) throw new Error(data.error);
-        fixed++;
-        fetchFindings(runId);
-      } catch {
-        failed++;
-      }
-    }
-    toast({
-      title: "Auto-Fix All Complete",
-      description: `Fixed ${fixed} of ${fixable.length} issues${failed > 0 ? ` (${failed} failed)` : ""}.`,
-    });
-    setFixingAll(false);
-    setFixAllProgress("");
-    fetchRuns();
   };
 
   const handleApplyFix = async (findingId: string) => {

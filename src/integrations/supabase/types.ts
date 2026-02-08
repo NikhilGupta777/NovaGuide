@@ -386,6 +386,7 @@ export type Database = {
           created_at: string | null
           duplicates_found: number | null
           error_message: string | null
+          fix_all_status: string | null
           id: string
           started_at: string | null
           status: string | null
@@ -399,6 +400,7 @@ export type Database = {
           created_at?: string | null
           duplicates_found?: number | null
           error_message?: string | null
+          fix_all_status?: string | null
           id?: string
           started_at?: string | null
           status?: string | null
@@ -412,6 +414,7 @@ export type Database = {
           created_at?: string | null
           duplicates_found?: number | null
           error_message?: string | null
+          fix_all_status?: string | null
           id?: string
           started_at?: string | null
           status?: string | null
