@@ -781,16 +781,23 @@ serve(async (req) => {
 
     console.log(`Nightly Builder triggered for batch ${batch}`);
 
-    // Run in background - fire and forget
-    runNightlyBuilder(batch).catch((e) =>
-      console.error("Nightly builder background error:", e)
-    );
-
-    return jsonResp({
-      success: true,
-      message: `Nightly builder batch ${batch} started in background`,
-      batch,
-    });
+    // Run the builder and await completion — fire-and-forget dies when the container shuts down
+    // Edge functions have ~400s max, so this may time out on very large workloads
+    try {
+      await runNightlyBuilder(batch);
+      return jsonResp({
+        success: true,
+        message: `Nightly builder batch ${batch} completed`,
+        batch,
+      });
+    } catch (e) {
+      console.error("Nightly builder execution error:", e);
+      return jsonResp({
+        success: false,
+        message: `Nightly builder batch ${batch} failed: ${e instanceof Error ? e.message : String(e)}`,
+        batch,
+      });
+    }
   } catch (err) {
     console.error("Nightly builder handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);

@@ -113,10 +113,25 @@ export default function NightlyBuilderTab() {
     });
   }, []);
 
+  // Cleanup stale runs (stuck > 10 min) and initial load
   useEffect(() => {
-    fetchSettings();
-    fetchRuns();
-    fetchQueueStats();
+    const init = async () => {
+      await fetchSettings();
+      await fetchRuns();
+      await fetchQueueStats();
+
+      // Mark stale "researching" or "generating" runs as failed (>10 min old)
+      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      await supabase
+        .from("nightly_builder_runs")
+        .update({ status: "failed", error_message: "Timed out (no response after 10 minutes)", completed_at: new Date().toISOString() })
+        .in("status", ["researching", "generating", "pending"])
+        .lt("started_at", tenMinAgo);
+
+      // Re-fetch after cleanup
+      await fetchRuns();
+    };
+    init();
   }, [fetchSettings, fetchRuns, fetchQueueStats]);
 
   // Poll for active runs
@@ -168,19 +183,33 @@ export default function NightlyBuilderTab() {
 
   const handleRunNow = async (batch = 1) => {
     setTriggering(true);
+
+    // Poll for progress while the edge function is running
+    const pollInterval = setInterval(() => {
+      fetchRuns();
+      fetchQueueStats();
+    }, 8000);
+
     try {
       const { data, error } = await supabase.functions.invoke("ai-nightly-builder", {
         body: { batch },
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      toast({ title: "Nightly Builder Started", description: `Batch ${batch} is running in the background.` });
-      setTimeout(() => { fetchRuns(); fetchQueueStats(); }, 3000);
+      
+      if (data?.success) {
+        toast({ title: "Nightly Builder Complete", description: data.message || `Batch ${batch} finished.` });
+      } else {
+        toast({ title: "Nightly Builder Issue", description: data?.message || "Unexpected response", variant: "destructive" });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to trigger nightly builder";
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
+      clearInterval(pollInterval);
       setTriggering(false);
+      fetchRuns();
+      fetchQueueStats();
     }
   };
 
@@ -189,7 +218,7 @@ export default function NightlyBuilderTab() {
     toast({ title: "Stop Requested", description: "The builder will stop after the current article finishes." });
   };
 
-  const isRunning = runs.some(r => r.status === "researching" || r.status === "generating");
+  const isRunning = triggering || runs.some(r => r.status === "researching" || r.status === "generating");
   const lastRun = runs[0];
 
   if (loading) {
@@ -353,7 +382,7 @@ export default function NightlyBuilderTab() {
               {triggering ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Starting...
+                  Running pipeline...
                 </>
               ) : (
                 <>
