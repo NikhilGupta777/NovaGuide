@@ -965,9 +965,18 @@ serve(async (req) => {
         return jsonResp({ success: true, message: "No items to process" });
       }
 
-      console.log(`Starting manual batch generation (${pendingCount} items, self-chaining)...`);
-      selfInvoke({ action: "generate_manual_batch", autoPublish: body.autoPublish || false });
-      return jsonResp({ success: true, message: "Manual batch started in background" });
+      // Launch parallel chains for faster processing
+      // Each chain independently picks up and claims the next pending item
+      // Atomic claiming prevents double-processing
+      const parallelism = Math.min(body.parallelism || 3, pendingCount, 5); // max 5 chains
+      console.log(`Starting manual batch generation (${pendingCount} items, ${parallelism} parallel chains)...`);
+      
+      // Fire all chains immediately — atomic DB claiming handles contention
+      for (let i = 0; i < parallelism; i++) {
+        selfInvoke({ action: "generate_manual_batch", autoPublish: body.autoPublish || false, chainId: i });
+      }
+      
+      return jsonResp({ success: true, message: `Manual batch started with ${parallelism} parallel chains`, parallelism });
     }
 
     // Default: start nightly builder run
