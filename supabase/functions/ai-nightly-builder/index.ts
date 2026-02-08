@@ -75,23 +75,23 @@ async function deepResearchCategory(
 ): Promise<string[]> {
   console.log(`Deep researching category: ${categoryName}`);
 
-  const prompt = `You are researching for a tech help website called DigitalHelp.
+  const prompt = `You are researching for a help website called DigitalHelp.
 
 CATEGORY: ${categoryName}
 DESCRIPTION: ${categoryDescription || "General tech help articles"}
 
-EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest these again):
+EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest exact same like these again):
 ${existingTitles.length > 0 ? existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
 
 YOUR TASK:
-Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}".
+Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}" in the tech/digital help space.
 
 Focus on:
 - Questions real people ask on Google, Reddit, Quora, forums
 - Common problems and troubleshooting guides
 - Step-by-step how-to guides
 - Beginner-friendly topics that get high search volume
-- Recent/trending topics (2025-2026)
+- Recent/trending topics (2024-2026)
 
 IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
 
@@ -465,11 +465,11 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
 
 EXISTING CATEGORIES: ${categoryNames}
 
-What major tech help categories are MISSING from this website? Think about what people commonly search for help with in technology that isn't covered.
+What major tech help categories are MISSING from this website? Think about what people commonly search for help with in technology or other that isn't covered.
 
-Consider areas like: Smart Home, Privacy & VPN, Email, Cloud Storage, Gaming, Wearables, Networking, Printing, Streaming, etc.
+Consider areas like: Smart Home, Privacy & VPN, Email, Cloud Storage, Gaming, Wearables, Networking, Printing, Streaming, socialmedia (yt,instagram etc) and many more etc.
 
-Only suggest categories that would have substantial content (at least 20+ common questions). Don't suggest categories that overlap significantly with existing ones.
+Only suggest categories that would have substantial content (at least 15+ common questions). Don't suggest categories that overlap significantly with existing ones.
 
 Return a JSON array of objects with "name", "description", and "icon" fields.
 For "icon", choose from: ${SAFE_ICONS.join(", ")}. Default to "Lightbulb" if unsure.
