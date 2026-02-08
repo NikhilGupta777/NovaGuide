@@ -533,9 +533,15 @@ serve(async (req) => {
         console.log(`Fix all complete: ${fixed} fixed, ${failed} failed out of ${openFindings.length}`);
       })();
 
-      // Keep the function alive until background work completes
-      await backgroundWork;
+      // Use waitUntil for true background execution (survives client disconnect)
+      // @ts-ignore - EdgeRuntime is available in Supabase Edge Functions
+      if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+        EdgeRuntime.waitUntil(backgroundWork);
+        return jsonResp({ success: true, message: "Fix all started in background", total: openFindings.length });
+      }
 
+      // Fallback: await (still works but won't survive timeout)
+      await backgroundWork;
       return jsonResp({ success: true, message: "Fix all completed server-side" });
     }
 
