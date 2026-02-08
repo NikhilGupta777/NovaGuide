@@ -274,23 +274,23 @@ Return ONLY valid JSON, no markdown.`;
 
         // Step 1: Duplicate check — content overlap, not title similarity
         const dupResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
-          { role: "user", parts: [{ text: `Would an article about "${t.topic}" provide substantially the same advice/steps as any of these existing articles?\n${existingTitles.map((title, idx) => `${idx + 1}. ${title}`).join("\n")}\n\nOnly mark as duplicate if 80%+ of the actual content/steps would be identical. Different angles on similar topics are NOT duplicates.\n\nRespond with the check_duplicate function.` }] }
+          { role: "user", parts: [{ text: `Is there an existing article with a nearly IDENTICAL title AND identical content to "${t.topic}"?\n${existingTitles.map((title, idx) => `${idx + 1}. ${title}`).join("\n")}\n\nOnly mark as duplicate if the title is nearly word-for-word the same AND 95%+ of the steps/content would be identical. Different titles serving different search queries are NEVER duplicates.\n\nRespond with the check_duplicate function.` }] }
         ], [{
           function_declarations: [{
             name: "check_duplicate",
             parameters: {
               type: "OBJECT",
               properties: {
-                is_duplicate: { type: "BOOLEAN", description: "True ONLY if 80%+ of content/steps would be identical" },
-                similarity_score: { type: "NUMBER", description: "Content overlap score 0-100" },
+                is_duplicate: { type: "BOOLEAN", description: "True ONLY if title is nearly identical AND 95%+ of content would be the same" },
+                similarity_score: { type: "NUMBER", description: "Content overlap 0-100. Different titles automatically cap at 80." },
               },
               required: ["is_duplicate", "similarity_score"]
             }
           }]
-        }], "You analyze content overlap, not title similarity. Two articles about the same broad topic but different angles/solutions are NOT duplicates. Only flag if the actual steps/advice would be nearly identical.");
+        }], "You are extremely lenient. Only flag TRUE duplicates where the title is nearly word-for-word identical AND the content would be 95%+ the same. Different titles = different search traffic = ALWAYS allow. When in doubt, allow.");
 
         const dupArgs = extractFunctionCall(dupResp);
-        if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 90) {
+        if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 95) {
           console.log(`Skipping duplicate: "${t.topic}"`);
           await db.from("agent_runs").update({ status: "skipped", error_message: "Duplicate topic", completed_at: new Date().toISOString() }).eq("id", runId);
           continue;

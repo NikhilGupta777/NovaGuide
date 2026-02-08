@@ -178,13 +178,17 @@ async function step1_duplicateCheck(
 
   const systemPrompt = `You are a content overlap analyzer for a tech help website. Your job is to determine if a proposed article would provide SUBSTANTIALLY THE SAME advice, steps, and solutions as an existing article.
 
-IMPORTANT RULES:
-- Two articles about the SAME broad topic but with DIFFERENT angles, audiences, or solutions are NOT duplicates.
-- Example: "Why is my internet slow? Speed fixes" vs "Internet not working: Troubleshooting guide" → NOT duplicates (one is about speed optimization, the other is about connectivity failure)
-- Example: "How to clear cache on Chrome" vs "How to clear cache on your browser" → DUPLICATES (same steps, same solution)
-- Example: "Phone storage full: free up space" vs "How to clear cache on your device" → NOT duplicates (different scope)
-- Only mark as duplicate if 80%+ of the actual article CONTENT/STEPS would be identical.
-- When in doubt, mark as NOT duplicate — it's better to have two slightly related articles than to miss useful content.
+YOUR JOB: Only flag TRUE duplicates — articles that are essentially the SAME article rewritten.
+
+CRITICAL RULES:
+- Different titles that serve different user search queries = ALWAYS allow. Users search different phrases and each title captures different traffic.
+- Two or three articles on a similar broad topic but written differently, with different titles, different structure, or slightly different focus = NOT duplicates. These are VALUABLE because they serve different readers.
+- The ONLY duplicate is when the title is nearly word-for-word identical AND the step-by-step content would be 95%+ the same instructions in the same order.
+- "Slow internet fixes" vs "Internet not working troubleshooting" → NOT duplicate (different problems)
+- "Clear Chrome cache" vs "Clear browser cache" → NOT duplicate (different scope, different search intent)
+- "How to fix Wi-Fi" vs "How to Fix Wi-Fi" → DUPLICATE (same title, same content)
+- "Reset Windows password" vs "Forgot Windows password: reset guide" → NOT duplicate (different title = different search traffic)
+- When in doubt, ALWAYS mark as NOT duplicate. More content is better than less.
 
 Return your analysis using the check_duplicate function.`;
 
@@ -193,7 +197,7 @@ Return your analysis using the check_duplicate function.`;
 Existing articles:
 ${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
-Would the proposed article cover essentially the SAME solutions/steps as any existing article? Only flag as duplicate if the actual content would overlap 80%+. Different angles on similar topics are NOT duplicates.`;
+Is there an existing article with a nearly IDENTICAL title AND identical step-by-step content? Only flag as duplicate if it's essentially the same article rewritten word-for-word. Different titles, different angles, or different wording = NOT a duplicate.`;
 
   const response = await callGemini(apiKey, MODEL_LITE, [
     { role: "user", parts: [{ text: prompt }] }
@@ -205,8 +209,8 @@ Would the proposed article cover essentially the SAME solutions/steps as any exi
         parameters: {
           type: "OBJECT",
           properties: {
-            is_duplicate: { type: "BOOLEAN", description: "True ONLY if the proposed article would have 80%+ of the same steps/solutions as an existing one" },
-            similarity_score: { type: "NUMBER", description: "Content overlap score 0-100 (how much of the actual advice/steps would be identical)" },
+            is_duplicate: { type: "BOOLEAN", description: "True ONLY if an existing article has a nearly identical title AND 95%+ identical step-by-step content" },
+            similarity_score: { type: "NUMBER", description: "Content overlap score 0-100. Only 95+ means true duplicate. Different titles automatically cap this at 80." },
             similar_to: { type: "STRING", description: "Title of the most similar existing article, or empty string" },
             reasoning: { type: "STRING", description: "Brief explanation of WHY content would or would not overlap" }
           },
@@ -220,7 +224,7 @@ Would the proposed article cover essentially the SAME solutions/steps as any exi
   if (!args) return { isDuplicate: false };
 
   return {
-    isDuplicate: Boolean(args.is_duplicate) && (args.similarity_score as number) >= 90,
+    isDuplicate: Boolean(args.is_duplicate) && (args.similarity_score as number) >= 95,
     similarTitle: args.similar_to as string,
     score: args.similarity_score as number
   };
