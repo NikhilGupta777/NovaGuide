@@ -221,46 +221,50 @@ export default function ContentAuditTab() {
   const handleRunAudit = async () => {
     setTriggering(true);
 
-    const pollInterval = setInterval(() => {
-      fetchRuns();
-      if (selectedRunId) fetchFindings(selectedRunId);
-    }, 8000);
+    // Fire-and-forget — the edge function runs in background
+    supabase.functions.invoke("ai-content-audit", {
+      body: { autoFix },
+    }).then(({ data, error }) => {
+      if (error) console.error("Audit invoke error:", error);
+      else console.log("Audit invoke response:", data);
+    }).catch((err) => {
+      console.error("Audit invoke failed:", err);
+    });
 
-    try {
-      const { data, error } = await supabase.functions.invoke("ai-content-audit", {
-        body: { autoFix },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+    // Give the server a moment to create the run row, then start polling
+    await new Promise(r => setTimeout(r, 2000));
+    await fetchRuns();
+    setTriggering(false);
 
-      if (data?.success) {
-        toast({ title: "Content Audit Complete", description: data.message || "All articles scanned." });
-        await fetchRuns();
-        // Auto-fix all remaining issues if enabled
-        if (autoFixAll) {
-          const { data: latestRun } = await supabase
-            .from("content_audit_runs")
-            .select("id")
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          if (latestRun) {
-            setSelectedRunId(latestRun.id);
-            triggerFixAllForRun(latestRun.id);
+    toast({ title: "Content Audit Started", description: "Scanning in the background — you can leave and come back." });
+
+    // Start polling in the background for progress
+    const pollId = setInterval(async () => {
+      await fetchRuns();
+      // Check if latest run is done
+      const { data: latestRuns } = await supabase
+        .from("content_audit_runs")
+        .select("id, status")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (latestRuns) {
+        setSelectedRunId(latestRuns.id);
+        fetchFindings(latestRuns.id);
+        if (latestRuns.status === "completed" || latestRuns.status === "failed") {
+          clearInterval(pollId);
+          toast({ 
+            title: latestRuns.status === "completed" ? "Audit Complete" : "Audit Failed", 
+            description: latestRuns.status === "completed" ? "All articles scanned." : "Check the error details." 
+          });
+          // Auto-fix all remaining issues if enabled
+          if (autoFixAll && latestRuns.status === "completed") {
+            triggerFixAllForRun(latestRuns.id);
           }
         }
-      } else {
-        toast({ title: "Audit Issue", description: data?.message || "Unexpected response", variant: "destructive" });
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to start audit";
-      toast({ title: "Error", description: msg, variant: "destructive" });
-    } finally {
-      clearInterval(pollInterval);
-      setTriggering(false);
-      fetchRuns();
-      if (selectedRunId) fetchFindings(selectedRunId);
-    }
+    }, 5000);
   };
 
   const handleApplyFix = async (findingId: string) => {

@@ -612,17 +612,24 @@ serve(async (req) => {
     const autoFix = body.autoFix !== false;
     console.log(`Content audit triggered (autoFix: ${autoFix})`);
 
-    // Await completion instead of fire-and-forget
-    try {
-      await runContentAudit(autoFix);
-      return jsonResp({ success: true, message: "Content audit completed" });
-    } catch (e) {
-      console.error("Content audit execution error:", e);
-      return jsonResp({
-        success: false,
-        message: `Content audit failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
+    // Run in background so it survives client disconnect / container timeout
+    const work = (async () => {
+      try {
+        await runContentAudit(autoFix);
+      } catch (e) {
+        console.error("Content audit execution error:", e);
+      }
+    })();
+
+    // @ts-ignore - EdgeRuntime.waitUntil available in Supabase Edge Functions
+    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+      EdgeRuntime.waitUntil(work);
+      return jsonResp({ success: true, message: "Content audit started in background" });
     }
+
+    // Fallback: await
+    await work;
+    return jsonResp({ success: true, message: "Content audit completed" });
   } catch (err) {
     console.error("Content audit handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);
