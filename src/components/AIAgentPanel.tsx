@@ -360,18 +360,27 @@ export default function AIAgentPanel() {
 
       // Auto-make: push all to batch and start generating server-side
       if (autoMake && topics.length > 0) {
-        // Topics are already in nightly_builder_queue (added by addToQueue below or by edge function)
-        for (const t of topics) {
-          await supabase.from("nightly_builder_queue").upsert({
-            topic: t.topic,
-            category_id: t.category_id || null,
-            priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
-            status: "pending",
-          }, { onConflict: "topic" }).select();
+        // Insert all discovered topics into the batch queue
+        const insertRows = topics.map(t => ({
+          topic: t.topic,
+          category_id: t.category_id || null,
+          priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
+          status: "pending" as const,
+        }));
+
+        const { error: queueError } = await supabase
+          .from("nightly_builder_queue")
+          .insert(insertRows);
+
+        if (queueError) {
+          console.error("Failed to insert batch queue items:", queueError);
+          toast({ title: "Queue Error", description: "Failed to add topics to batch queue. Try adding them manually.", variant: "destructive" });
+        } else {
+          setBatchQueue(topics);
+          setBatchTotal(topics.length);
+          toast({ title: "Auto-Make Active", description: `Queued ${topics.length} topics — starting batch generation...` });
+          await startServerBatch();
         }
-        setBatchQueue(topics);
-        toast({ title: "Auto-Make Active", description: `Pushing ${topics.length} topics to batch...` });
-        await startServerBatch();
       }
     } catch (err: unknown) {
       // Edge function error handler already marks the run as failed in DB
