@@ -472,6 +472,8 @@ export default function AIAgentPanel() {
         category_id: topic.category_id || null,
         priority: topic.priority === "high" ? 1 : topic.priority === "medium" ? 2 : 3,
         status: "pending",
+        run_date: null,
+        batch_number: null,
       });
     }
   };

@@ -120,13 +120,20 @@ export default function NightlyBuilderTab() {
       await fetchRuns();
       await fetchQueueStats();
 
-      // Mark stale "researching" or "generating" runs as failed (>10 min old)
-      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      // Mark stale "researching" or "generating" runs as failed (>6 hours old)
+      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
       await supabase
         .from("nightly_builder_runs")
-        .update({ status: "failed", error_message: "Timed out (no response after 10 minutes)", completed_at: new Date().toISOString() })
+        .update({ status: "failed", error_message: "Timed out (no response after 6 hours)", completed_at: new Date().toISOString() })
         .in("status", ["researching", "generating", "pending"])
-        .lt("started_at", tenMinAgo);
+        .lt("started_at", sixHoursAgo);
+
+      // Recover stuck "processing" manual queue items on load
+      await supabase
+        .from("nightly_builder_queue")
+        .update({ status: "pending" })
+        .eq("status", "processing")
+        .is("run_date", null);
 
       // Re-fetch after cleanup
       await fetchRuns();
@@ -183,33 +190,26 @@ export default function NightlyBuilderTab() {
 
   const handleRunNow = async (batch = 1) => {
     setTriggering(true);
-
-    // Poll for progress while the edge function is running
-    const pollInterval = setInterval(() => {
-      fetchRuns();
-      fetchQueueStats();
-    }, 8000);
-
     try {
-      const { data, error } = await supabase.functions.invoke("ai-nightly-builder", {
+      // Fire-and-forget: don't await the full response since it runs in background
+      supabase.functions.invoke("ai-nightly-builder", {
         body: { batch },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      
-      if (data?.success) {
-        toast({ title: "Nightly Builder Complete", description: data.message || `Batch ${batch} finished.` });
-      } else {
-        toast({ title: "Nightly Builder Issue", description: data?.message || "Unexpected response", variant: "destructive" });
-      }
+      }).then(({ data, error }) => {
+        if (error || data?.error) {
+          console.error("Nightly builder background error:", error || data?.error);
+        }
+      }).catch(err => console.error("Nightly builder invoke error:", err));
+
+      toast({ title: "Nightly Builder Triggered", description: `Batch ${batch} is running in the background. Progress updates automatically.` });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to trigger nightly builder";
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
-      clearInterval(pollInterval);
-      setTriggering(false);
-      fetchRuns();
-      fetchQueueStats();
+      setTimeout(() => {
+        setTriggering(false);
+        fetchRuns();
+        fetchQueueStats();
+      }, 2000);
     }
   };
 
@@ -353,6 +353,29 @@ export default function NightlyBuilderTab() {
                 <span className="text-muted-foreground">Last run</span>
                 <span className="text-foreground">
                   {new Date(settings.last_run_at).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {settings?.enabled && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Next run</span>
+                <span className="text-foreground">
+                  {(() => {
+                    if (settings.next_run_at) return new Date(settings.next_run_at).toLocaleString();
+                    const now = new Date();
+                    const cronTimes = [{ h: 6, m: 30 }, { h: 12, m: 30 }, { h: 18, m: 30 }];
+                    for (const t of cronTimes) {
+                      if (now.getUTCHours() < t.h || (now.getUTCHours() === t.h && now.getUTCMinutes() < t.m)) {
+                        const next = new Date(now);
+                        next.setUTCHours(t.h, t.m, 0, 0);
+                        return next.toLocaleString();
+                      }
+                    }
+                    const next = new Date(now);
+                    next.setUTCDate(next.getUTCDate() + 1);
+                    next.setUTCHours(6, 30, 0, 0);
+                    return next.toLocaleString();
+                  })()}
                 </span>
               </div>
             )}
