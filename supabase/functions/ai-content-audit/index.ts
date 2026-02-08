@@ -25,35 +25,39 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL = "gemini-2.5-flash";
+const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const MODEL = "google/gemini-2.5-flash";
 
-async function callGemini(apiKey: string, prompt: string, systemInstruction: string) {
-  const url = `${GEMINI_BASE}/models/${MODEL}:generateContent?key=${apiKey}`;
-  const resp = await fetch(url, {
+async function callAI(apiKey: string, prompt: string, systemInstruction: string): Promise<string> {
+  const resp = await fetch(AI_GATEWAY, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
     body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      generationConfig: { temperature: 0.3, maxOutputTokens: 8192 },
+      model: MODEL,
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.3,
+      max_tokens: 8192,
     }),
   });
 
   if (!resp.ok) {
     const txt = await resp.text();
     if (resp.status === 429) {
-      console.log("Rate limited, waiting 30s...");
-      await delay(30000);
-      return callGemini(apiKey, prompt, systemInstruction);
+      console.log("Rate limited, waiting 15s...");
+      await delay(15000);
+      return callAI(apiKey, prompt, systemInstruction);
     }
-    throw new Error(`Gemini error (${resp.status}): ${txt}`);
+    throw new Error(`AI error (${resp.status}): ${txt}`);
   }
 
   const data = await resp.json();
-  const candidates = data.candidates || [];
-  if (!candidates[0]?.content?.parts) return "";
-  return candidates[0].content.parts.map((p: { text?: string }) => p.text || "").join("");
+  return data.choices?.[0]?.message?.content || "";
 }
 
 // ── Duplicate Detection ──────────────────────────────────────────
@@ -66,12 +70,10 @@ function findDuplicates(articles: { id: string; title: string; slug: string; con
       const a = articles[i];
       const b = articles[j];
 
-      // Check title similarity
       const titleA = a.title.toLowerCase().replace(/[^a-z0-9\s]/g, "");
       const titleB = b.title.toLowerCase().replace(/[^a-z0-9\s]/g, "");
 
-      // Exact or near-exact title match
-      if (titleA === titleB || titleA.includes(titleB) || titleB.includes(titleA)) {
+      if (titleA === titleB || (titleA.length > 10 && titleB.length > 10 && (titleA.includes(titleB) || titleB.includes(titleA)))) {
         duplicates.push({
           articleId: a.id, relatedId: b.id,
           articleTitle: a.title, relatedTitle: b.title,
@@ -80,7 +82,6 @@ function findDuplicates(articles: { id: string; title: string; slug: string; con
         continue;
       }
 
-      // Slug match
       if (a.slug === b.slug) {
         duplicates.push({
           articleId: a.id, relatedId: b.id,
@@ -105,29 +106,30 @@ async function analyzeArticlesBatch(
 }[]> {
 
   const articlesText = articles.map((a, i) =>
-    `--- ARTICLE ${i} (ID: ${a.id}) ---\nTitle: ${a.title}\nExcerpt: ${a.excerpt || "None"}\nContent (first 1500 chars):\n${(a.content || "").substring(0, 1500)}\n`
+    `--- ARTICLE ${i} (ID: ${a.id}) ---\nTitle: ${a.title}\nExcerpt: ${a.excerpt || "None"}\nContent (first 2000 chars):\n${(a.content || "").substring(0, 2000)}\n`
   ).join("\n");
 
   const systemPrompt = `You are an expert content editor and SEO specialist. Analyze each article for issues. For each article, identify:
 
 1. **grammar** - Grammar, spelling, or punctuation errors
 2. **wording** - Awkward phrasing, unclear sentences, or jargon without explanation
-3. **seo** - Missing or poor SEO (title too long/short, weak excerpt, missing structure)
-4. **factual** - Potentially outdated or incorrect information
-5. **quality** - Low quality content, too short, or lacks depth
+3. **seo** - Missing or poor SEO (title too long/short, weak excerpt, missing structure, duplicate H1)
+4. **factual** - Potentially outdated or incorrect information, speculative future dates
+5. **quality** - Low quality content, too short, incomplete, or lacks depth
 6. **formatting** - Poor markdown formatting, missing headers, walls of text
 
 For each issue found, specify:
 - type: one of the above categories
-- severity: "critical", "warning", or "info"
-- description: what the specific issue is
-- suggestion: how to fix it
-- autoFixable: true only for minor grammar/wording tweaks that can be fixed without changing meaning
+- severity: "critical" (must fix), "warning" (should fix), or "info" (nice to fix)
+- description: what the specific issue is (be concrete, quote the problematic text)
+- suggestion: exactly how to fix it (be specific and actionable)
+- autoFixable: true ONLY for simple grammar fixes, typo corrections, or minor wording improvements
 
 Return ONLY a valid JSON array where each element has "articleId" (string) and "issues" (array of issue objects).
-If an article has no issues, include it with an empty issues array.`;
+If an article has no issues, include it with an empty issues array.
+Be thorough but avoid false positives.`;
 
-  const result = await callGemini(apiKey, `Analyze these articles for issues:\n\n${articlesText}`, systemPrompt);
+  const result = await callAI(apiKey, `Analyze these articles for issues:\n\n${articlesText}`, systemPrompt);
 
   try {
     const jsonMatch = result.match(/\[[\s\S]*\]/);
@@ -173,7 +175,7 @@ ${issuesList}
 
 Apply only these minor fixes and return the corrected article as JSON.`;
 
-  const result = await callGemini(apiKey, prompt, systemPrompt);
+  const result = await callAI(apiKey, prompt, systemPrompt);
 
   try {
     const jsonMatch = result.match(/\{[\s\S]*\}/);
@@ -191,8 +193,8 @@ Apply only these minor fixes and return the corrected article as JSON.`;
 
 async function runContentAudit(autoFix: boolean) {
   const db = serviceClient();
-  const apiKey = Deno.env.get("GEMINI_API_KEY");
-  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+  const apiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
 
   // Create audit run
   const { data: runData } = await db.from("content_audit_runs").insert({
@@ -232,7 +234,6 @@ async function runContentAudit(autoFix: boolean) {
     duplicatesFound = duplicates.length;
 
     for (const dup of duplicates) {
-      // Insert finding
       await db.from("content_audit_findings").insert({
         run_id: runId,
         article_id: dup.articleId,
@@ -247,7 +248,6 @@ async function runContentAudit(autoFix: boolean) {
       });
       totalIssues++;
 
-      // Auto-action: set the newer duplicate to draft if it's published
       const newerArticle = articles.find(a => a.id === dup.relatedId);
       if (newerArticle && newerArticle.status === "published") {
         await db.from("articles").update({ status: "draft" }).eq("id", dup.relatedId);
@@ -270,9 +270,16 @@ async function runContentAudit(autoFix: boolean) {
       }
     }
 
-    // Phase 2: AI-powered content analysis (in batches of 5)
+    // Update progress after phase 1
+    await db.from("content_audit_runs").update({
+      duplicates_found: duplicatesFound,
+      articles_set_to_draft: articlesSetToDraft,
+      total_issues_found: totalIssues,
+    }).eq("id", runId);
+
+    // Phase 2: AI-powered content analysis (in batches of 3 for reliability)
     console.log("Phase 2: AI content analysis...");
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 3;
     for (let i = 0; i < articles.length; i += BATCH_SIZE) {
       const batch = articles.slice(i, i + BATCH_SIZE);
       console.log(`Analyzing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(articles.length / BATCH_SIZE)}...`);
@@ -351,7 +358,7 @@ async function runContentAudit(autoFix: boolean) {
 
       // Rate limit between batches
       if (i + BATCH_SIZE < articles.length) {
-        await delay(3000);
+        await delay(2000);
       }
     }
 
@@ -366,7 +373,7 @@ async function runContentAudit(autoFix: boolean) {
       completed_at: new Date().toISOString(),
     }).eq("id", runId);
 
-    console.log(`Audit complete: ${articles.length} articles scanned, ${totalIssues} issues found, ${autoFixesApplied} auto-fixes, ${duplicatesFound} duplicates, ${articlesSetToDraft} set to draft`);
+    console.log(`Audit complete: ${articles.length} scanned, ${totalIssues} issues, ${autoFixesApplied} auto-fixes`);
 
   } catch (err) {
     console.error("Content audit error:", err);
@@ -378,6 +385,71 @@ async function runContentAudit(autoFix: boolean) {
   }
 }
 
+// ── Apply Fix to Single Article ──────────────────────────────────
+
+async function applyFixToArticle(findingId: string) {
+  const db = serviceClient();
+  const apiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
+
+  // Get finding
+  const { data: finding } = await db.from("content_audit_findings")
+    .select("*")
+    .eq("id", findingId)
+    .single();
+
+  if (!finding) throw new Error("Finding not found");
+  if (!finding.article_id) throw new Error("No article associated with this finding");
+
+  // Get article
+  const { data: article } = await db.from("articles")
+    .select("id, title, content, excerpt")
+    .eq("id", finding.article_id)
+    .single();
+
+  if (!article) throw new Error("Article not found");
+
+  const systemPrompt = `You are a careful editor. Apply the specific fix described below to this article. Maintain the overall tone and structure. Return a JSON object with:
+- "title": corrected title
+- "content": corrected FULL content (not just the changed parts)
+- "excerpt": corrected excerpt
+- "fixDescription": one sentence describing what you changed`;
+
+  const prompt = `Article Title: ${article.title}
+Excerpt: ${article.excerpt || "None"}
+Content:
+${article.content || ""}
+
+Issue: ${finding.description}
+Suggestion: ${finding.suggestion}
+
+Apply this fix and return the corrected article as JSON.`;
+
+  const result = await callAI(apiKey, prompt, systemPrompt);
+
+  const jsonMatch = result.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("AI did not return valid JSON");
+
+  const fixed = JSON.parse(jsonMatch[0]);
+  const updatePayload: Record<string, unknown> = {};
+  if (fixed.title && fixed.title !== article.title) updatePayload.title = fixed.title;
+  if (fixed.content && fixed.content !== article.content) updatePayload.content = fixed.content;
+  if (fixed.excerpt && fixed.excerpt !== article.excerpt) updatePayload.excerpt = fixed.excerpt;
+
+  if (Object.keys(updatePayload).length > 0) {
+    await db.from("articles").update(updatePayload).eq("id", article.id);
+  }
+
+  // Mark finding as resolved
+  await db.from("content_audit_findings").update({
+    status: "resolved",
+    auto_fixed: true,
+    fix_applied: fixed.fixDescription || "Applied AI-suggested fix",
+  }).eq("id", findingId);
+
+  return { fixed: Object.keys(updatePayload).length > 0, description: fixed.fixDescription };
+}
+
 // ── HTTP Handler ──────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -386,7 +458,6 @@ serve(async (req) => {
   }
 
   try {
-    // Auth: require admin
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return jsonResp({ error: "Unauthorized" }, 401);
 
@@ -412,20 +483,28 @@ serve(async (req) => {
     }
 
     const body = await req.json().catch(() => ({}));
-    const autoFix = body.autoFix !== false; // default true
 
+    // Handle "apply fix" action
+    if (body.action === "apply_fix" && body.findingId) {
+      console.log(`Applying fix to finding: ${body.findingId}`);
+      const result = await applyFixToArticle(body.findingId);
+      return jsonResp({ success: true, ...result });
+    }
+
+    const autoFix = body.autoFix !== false;
     console.log(`Content audit triggered (autoFix: ${autoFix})`);
 
-    // Run in background
-    runContentAudit(autoFix).catch((e) =>
-      console.error("Content audit background error:", e)
-    );
-
-    return jsonResp({
-      success: true,
-      message: "Content audit started in background",
-      autoFix,
-    });
+    // Await completion instead of fire-and-forget
+    try {
+      await runContentAudit(autoFix);
+      return jsonResp({ success: true, message: "Content audit completed" });
+    } catch (e) {
+      console.error("Content audit execution error:", e);
+      return jsonResp({
+        success: false,
+        message: `Content audit failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
   } catch (err) {
     console.error("Content audit handler error:", err);
     const msg = err instanceof Error ? err.message : String(err);
