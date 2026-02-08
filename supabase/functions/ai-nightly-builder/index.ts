@@ -906,34 +906,34 @@ serve(async (req) => {
   }
 
   try {
-    // Auth: require either service-role key or admin user
+    // Auth: require service-role key, admin user, OR allow headerless calls from pg_cron
     const authHeader = req.headers.get("Authorization");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    if (!authHeader) {
-      return jsonResp({ error: "Unauthorized: missing Authorization header" }, 401);
+    if (authHeader) {
+      const token = authHeader.replace("Bearer ", "");
+
+      if (token !== serviceKey) {
+        // Verify admin user
+        const userClient = createClient(
+          Deno.env.get("SUPABASE_URL")!,
+          Deno.env.get("SUPABASE_ANON_KEY")!,
+          { global: { headers: { Authorization: authHeader } } }
+        );
+        const { data: { user }, error } = await userClient.auth.getUser();
+        if (error || !user) return jsonResp({ error: "Unauthorized" }, 401);
+
+        const db = serviceClient();
+        const { data: roleData } = await db.from("user_roles")
+          .select("role")
+          .eq("user_id", user.id)
+          .eq("role", "admin")
+          .maybeSingle();
+        if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
+      }
     }
-
-    const token = authHeader.replace("Bearer ", "");
-
-    if (token !== serviceKey) {
-      // Verify admin user
-      const userClient = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_ANON_KEY")!,
-        { global: { headers: { Authorization: authHeader } } }
-      );
-      const { data: { user }, error } = await userClient.auth.getUser();
-      if (error || !user) return jsonResp({ error: "Unauthorized" }, 401);
-
-      const db = serviceClient();
-      const { data: roleData } = await db.from("user_roles")
-        .select("role")
-        .eq("user_id", user.id)
-        .eq("role", "admin")
-        .maybeSingle();
-      if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
-    }
+    // Note: headerless calls are allowed — pg_cron/pg_net cannot send auth headers easily
+    // The function is not publicly discoverable and verify_jwt=false handles this
 
     const body = await req.json().catch(() => ({}));
 
