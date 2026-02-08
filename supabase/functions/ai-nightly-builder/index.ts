@@ -25,6 +25,19 @@ function serviceClient() {
   );
 }
 
+// ── Self-Chaining: fire-and-forget call to ourselves ─────────────
+function selfInvoke(body: Record<string, unknown>) {
+  const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ai-nightly-builder`;
+  fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+    },
+    body: JSON.stringify(body),
+  }).catch(err => console.error("Self-invoke failed:", err));
+}
+
 function jsonResp(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -539,9 +552,9 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
     details: detailsMap,
   }).eq("id", runId);
 
-  // Phase F: Generate Batch 1 articles
-  console.log("Phase F: Generating Batch 1 articles...");
-  await generateArticlesFromQueue(db, settings, runId, 1, today);
+  // Phase F: Start generating Batch 1 articles via self-chaining
+  console.log("Phase F: Starting Batch 1 article generation (self-chaining)...");
+  selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
 }
 
 // ── Overflow Batch Processing ─────────────────────────────────────
@@ -570,38 +583,48 @@ async function runOverflowBatch(
     return;
   }
 
-  console.log(`Processing ${count} pending items for batch ${batch}`);
+  console.log(`Processing ${count} pending items for batch ${batch} via self-chaining`);
   await db.from("nightly_builder_runs").update({ status: "generating" }).eq("id", runId);
-  await generateArticlesFromQueue(db, settings, runId, batch, today);
+  selfInvoke({ action: "generate_one", runId, batch, runDate: today });
 }
 
-// ── Article Generation from Queue ─────────────────────────────────
+// ── Article Generation from Queue (one at a time, self-chaining) ──
 
-async function generateArticlesFromQueue(
-  db: ReturnType<typeof serviceClient>,
-  settings: Record<string, unknown>,
+async function generateOneFromQueue(
   runId: string,
   batch: number,
   runDate: string
 ) {
+  const db = serviceClient();
+  const settings = await ensureSettings(db);
+  if (!settings) throw new Error("Failed to get settings");
+
   const settingsId = settings.id as string;
   const minQuality = (settings.auto_publish_min_quality as number) || 7;
   const minFactual = (settings.auto_publish_min_factual as number) || 7;
 
-  let articlesGenerated = 0;
-  let articlesPublished = 0;
-  let articlesFailed = 0;
+  // Check stop flag
+  if (settings.stop_requested) {
+    console.log("Stop requested. Halting generation.");
+    await db.from("nightly_builder_runs").update({
+      status: "stopped",
+      completed_at: new Date().toISOString(),
+    }).eq("id", runId);
+    await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
+    return;
+  }
 
-  // Fetch pending queue items for this batch
+  // Fetch ONE pending queue item
   const { data: queueItems } = await db.from("nightly_builder_queue")
     .select("*")
     .eq("run_date", runDate)
     .eq("batch_number", batch)
     .eq("status", "pending")
-    .order("priority", { ascending: true });
+    .order("priority", { ascending: true })
+    .limit(1);
 
   if (!queueItems || queueItems.length === 0) {
-    console.log("No pending queue items. Completing.");
+    console.log("No pending queue items. Completing run.");
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
@@ -609,134 +632,196 @@ async function generateArticlesFromQueue(
     return;
   }
 
-  console.log(`Generating ${queueItems.length} articles for batch ${batch}...`);
-
+  const item = queueItems[0];
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  for (const item of queueItems) {
-    // Check stop flag
-    const { data: freshSettings } = await db.from("nightly_builder_settings")
-      .select("stop_requested")
-      .eq("id", settingsId)
-      .single();
+  // Mark queue item as processing
+  await db.from("nightly_builder_queue").update({ status: "processing" }).eq("id", item.id);
 
-    if (freshSettings?.stop_requested) {
-      console.log("Stop requested. Halting generation.");
-      await db.from("nightly_builder_runs").update({
-        status: "stopped",
-        articles_generated: articlesGenerated,
-        articles_published: articlesPublished,
-        articles_failed: articlesFailed,
-        completed_at: new Date().toISOString(),
-      }).eq("id", runId);
-      await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
-      return;
+  try {
+    console.log(`Generating article: "${item.topic}"`);
+
+    const agentResp = await fetch(`${supabaseUrl}/functions/v1/ai-agent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+      body: JSON.stringify({
+        topic: item.topic,
+        categoryId: item.category_id,
+        mode: "nightly",
+      }),
+    });
+
+    if (!agentResp.ok) {
+      const errText = await agentResp.text();
+      throw new Error(`ai-agent returned ${agentResp.status}: ${errText}`);
     }
 
-    // Mark queue item as processing
-    await db.from("nightly_builder_queue").update({ status: "processing" }).eq("id", item.id);
+    const agentData = await agentResp.json();
 
-    try {
-      console.log(`Generating article: "${item.topic}"`);
-
-      // Call ai-agent edge function via HTTP with service-role key
-      const agentResp = await fetch(`${supabaseUrl}/functions/v1/ai-agent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${serviceKey}`,
-        },
-        body: JSON.stringify({
-          topic: item.topic,
-          categoryId: item.category_id,
-          mode: "nightly",
-        }),
-      });
-
-      if (!agentResp.ok) {
-        const errText = await agentResp.text();
-        throw new Error(`ai-agent returned ${agentResp.status}: ${errText}`);
-      }
-
-      const agentData = await agentResp.json();
-
-      if (agentData.skipped) {
-        console.log(`Skipped: ${agentData.reason}`);
-        await db.from("nightly_builder_queue").update({
-          status: "skipped",
-          error_message: agentData.reason,
-        }).eq("id", item.id);
-        continue;
-      }
-
-      if (agentData.error) {
-        throw new Error(agentData.error);
-      }
-
-      // ai-agent returns articleId directly in the response (via ...savedArticle spread)
+    if (agentData.skipped) {
+      console.log(`Skipped: ${agentData.reason}`);
+      await db.from("nightly_builder_queue").update({
+        status: "skipped",
+        error_message: agentData.reason,
+      }).eq("id", item.id);
+    } else if (agentData.error) {
+      throw new Error(agentData.error);
+    } else {
       const articleId = agentData.id || agentData.articleId || agentData.article_id;
-      articlesGenerated++;
 
-      // Update queue item
       await db.from("nightly_builder_queue").update({
         status: "completed",
         article_id: articleId || null,
       }).eq("id", item.id);
 
-      // ai-agent returns _quality_score and _factual_score directly
+      // Update run progress
+      const { data: currentRun } = await db.from("nightly_builder_runs").select("articles_generated, articles_published").eq("id", runId).single();
+      const gen = (currentRun?.articles_generated || 0) + 1;
+      let pub = currentRun?.articles_published || 0;
+
       const qualityScore = agentData._quality_score || 0;
       const factualScore = agentData._factual_score || 0;
-
-      console.log(`Scores - Quality: ${qualityScore}, Factual: ${factualScore} (thresholds: ${minQuality}, ${minFactual})`);
 
       if (qualityScore >= minQuality && factualScore >= minFactual && articleId) {
         await db.from("articles").update({
           status: "published",
           published_at: new Date().toISOString(),
         }).eq("id", articleId);
-
-        articlesPublished++;
+        pub++;
         console.log(`Auto-published: "${item.topic}"`);
-      } else {
-        console.log(`Kept as draft: "${item.topic}" (Q:${qualityScore} F:${factualScore})`);
       }
 
-      // Update run progress
       await db.from("nightly_builder_runs").update({
-        articles_generated: articlesGenerated,
-        articles_published: articlesPublished,
-        articles_failed: articlesFailed,
-      }).eq("id", runId);
-
-    } catch (err) {
-      console.error(`Failed to generate "${item.topic}":`, err);
-      articlesFailed++;
-      await db.from("nightly_builder_queue").update({
-        status: "failed",
-        error_message: err instanceof Error ? err.message : String(err),
-      }).eq("id", item.id);
-
-      // Update run progress on failure too
-      await db.from("nightly_builder_runs").update({
-        articles_failed: articlesFailed,
+        articles_generated: gen,
+        articles_published: pub,
       }).eq("id", runId);
     }
+  } catch (err) {
+    console.error(`Failed to generate "${item.topic}":`, err);
+    await db.from("nightly_builder_queue").update({
+      status: "failed",
+      error_message: err instanceof Error ? err.message : String(err),
+    }).eq("id", item.id);
 
-    // Rate limit delay between articles
-    await delay(5000);
+    const { data: currentRun } = await db.from("nightly_builder_runs").select("articles_failed").eq("id", runId).single();
+    await db.from("nightly_builder_runs").update({
+      articles_failed: (currentRun?.articles_failed || 0) + 1,
+    }).eq("id", runId);
   }
 
-  // Mark run as completed
-  await db.from("nightly_builder_runs").update({
-    status: "completed",
-    articles_generated: articlesGenerated,
-    articles_published: articlesPublished,
-    articles_failed: articlesFailed,
-    completed_at: new Date().toISOString(),
-  }).eq("id", runId);
+  // Self-chain: check if there are more items
+  const { count: remaining } = await db.from("nightly_builder_queue")
+    .select("*", { count: "exact", head: true })
+    .eq("run_date", runDate)
+    .eq("batch_number", batch)
+    .eq("status", "pending");
 
-  console.log(`Batch ${batch} complete: ${articlesGenerated} generated, ${articlesPublished} published, ${articlesFailed} failed`);
+  if (remaining && remaining > 0) {
+    console.log(`Self-invoking for next article (${remaining} remaining)...`);
+    selfInvoke({ action: "generate_one", runId, batch, runDate });
+  } else {
+    await db.from("nightly_builder_runs").update({
+      status: "completed",
+      completed_at: new Date().toISOString(),
+    }).eq("id", runId);
+    console.log(`Batch ${batch} complete.`);
+  }
+}
+
+// ── Generate from manual batch queue (no run_date) ───────────────
+
+async function generateOneFromManualQueue(autoPublish: boolean) {
+  const db = serviceClient();
+
+  // Fetch ONE pending manual queue item (run_date is null)
+  const { data: queueItems } = await db.from("nightly_builder_queue")
+    .select("*")
+    .eq("status", "pending")
+    .is("run_date", null)
+    .order("priority", { ascending: true })
+    .order("created_at", { ascending: true })
+    .limit(1);
+
+  if (!queueItems || queueItems.length === 0) {
+    console.log("Manual batch complete — no more pending items.");
+    return;
+  }
+
+  const item = queueItems[0];
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+  // Mark as processing
+  await db.from("nightly_builder_queue").update({ status: "processing" }).eq("id", item.id);
+
+  try {
+    console.log(`Manual batch: generating "${item.topic}"`);
+
+    const agentResp = await fetch(`${supabaseUrl}/functions/v1/ai-agent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+      body: JSON.stringify({
+        topic: item.topic,
+        categoryId: item.category_id,
+        mode: "batch",
+      }),
+    });
+
+    if (!agentResp.ok) {
+      const errText = await agentResp.text();
+      throw new Error(`ai-agent returned ${agentResp.status}: ${errText}`);
+    }
+
+    const agentData = await agentResp.json();
+
+    if (agentData.skipped) {
+      await db.from("nightly_builder_queue").update({
+        status: "skipped",
+        error_message: agentData.reason,
+      }).eq("id", item.id);
+    } else if (agentData.error) {
+      throw new Error(agentData.error);
+    } else {
+      const articleId = agentData.id || agentData.articleId || agentData.article_id;
+      await db.from("nightly_builder_queue").update({
+        status: "completed",
+        article_id: articleId || null,
+      }).eq("id", item.id);
+
+      if (autoPublish && articleId) {
+        await db.from("articles").update({
+          status: "published",
+          published_at: new Date().toISOString(),
+        }).eq("id", articleId);
+      }
+    }
+  } catch (err) {
+    console.error(`Manual batch failed for "${item.topic}":`, err);
+    await db.from("nightly_builder_queue").update({
+      status: "failed",
+      error_message: err instanceof Error ? err.message : String(err),
+    }).eq("id", item.id);
+  }
+
+  // Self-chain for next item
+  const { count: remaining } = await db.from("nightly_builder_queue")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "pending")
+    .is("run_date", null);
+
+  if (remaining && remaining > 0) {
+    console.log(`Self-invoking for next manual batch item (${remaining} remaining)...`);
+    selfInvoke({ action: "generate_manual_batch", autoPublish });
+  } else {
+    console.log("Manual batch complete.");
+  }
 }
 
 // ── HTTP Handler ──────────────────────────────────────────────────
@@ -777,34 +862,42 @@ serve(async (req) => {
     }
 
     const body = await req.json().catch(() => ({}));
-    const batch = body.batch || 1;
 
-    console.log(`Nightly Builder triggered for batch ${batch}`);
-
-    // Run in background if possible (survives client disconnect)
-    const work = (async () => {
-      try {
-        await runNightlyBuilder(batch);
-      } catch (e) {
-        console.error("Nightly builder execution error:", e);
-      }
-    })();
-
-    // @ts-ignore - EdgeRuntime.waitUntil available in Supabase Edge Functions
-    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
-      EdgeRuntime.waitUntil(work);
-      return jsonResp({
-        success: true,
-        message: `Nightly builder batch ${batch} started in background`,
-        batch,
-      });
+    // Self-chain action: generate one article from nightly queue
+    if (body.action === "generate_one" && body.runId) {
+      console.log(`Self-chained: generating one article for run ${body.runId}, batch ${body.batch}`);
+      await generateOneFromQueue(body.runId, body.batch || 1, body.runDate || new Date().toISOString().split("T")[0]);
+      return jsonResp({ success: true });
     }
 
-    // Fallback: await
-    await work;
+    // Self-chain action: generate one from manual batch queue
+    if (body.action === "generate_manual_batch") {
+      console.log("Self-chained: generating one from manual batch queue");
+      await generateOneFromManualQueue(body.autoPublish || false);
+      return jsonResp({ success: true });
+    }
+
+    // Start manual batch processing (from AIAgentPanel)
+    if (body.action === "start_manual_batch") {
+      console.log("Starting manual batch generation (self-chaining)...");
+      selfInvoke({ action: "generate_manual_batch", autoPublish: body.autoPublish || false });
+      return jsonResp({ success: true, message: "Manual batch started in background" });
+    }
+
+    // Default: start nightly builder run
+    const batch = body.batch || 1;
+    console.log(`Nightly Builder triggered for batch ${batch}`);
+
+    // Run the research/setup phase, which will self-chain into generation
+    try {
+      await runNightlyBuilder(batch);
+    } catch (e) {
+      console.error("Nightly builder execution error:", e);
+    }
+
     return jsonResp({
       success: true,
-      message: `Nightly builder batch ${batch} completed`,
+      message: `Nightly builder batch ${batch} started`,
       batch,
     });
   } catch (err) {
