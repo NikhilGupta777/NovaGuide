@@ -49,6 +49,31 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+declare const EdgeRuntime: { waitUntil: (promise: Promise<unknown>) => void };
+
+function calculateNextRunAt(): string {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  // Cron times in UTC: 06:30 (12PM IST), 12:30 (6PM IST), 18:30 (12AM IST)
+  const cronTimesUTC = [
+    { h: 6, m: 30 },
+    { h: 12, m: 30 },
+    { h: 18, m: 30 },
+  ];
+  for (const t of cronTimesUTC) {
+    if (utcH < t.h || (utcH === t.h && utcM < t.m)) {
+      const next = new Date(now);
+      next.setUTCHours(t.h, t.m, 0, 0);
+      return next.toISOString();
+    }
+  }
+  const next = new Date(now);
+  next.setUTCDate(next.getUTCDate() + 1);
+  next.setUTCHours(6, 30, 0, 0);
+  return next.toISOString();
+}
+
 // ── Deep Research via Gemini Flash + Google Search Grounding ──────
 // Using the standard generateContent API with google_search tool
 // (more reliable than the Interactions API which may not be available)
@@ -58,7 +83,8 @@ async function deepResearchCategory(
   categoryName: string,
   categoryDescription: string,
   existingTitles: string[],
-  topicsCount: number
+  topicsCount: number,
+  retryCount = 0
 ): Promise<string[]> {
   console.log(`Deep researching category: ${categoryName}`);
 
@@ -108,10 +134,10 @@ Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 1
   if (!resp.ok) {
     const txt = await resp.text();
     console.error(`Research error for ${categoryName}:`, resp.status, txt);
-    if (resp.status === 429) {
-      console.log("Rate limited during research, waiting 30s...");
+    if (resp.status === 429 && retryCount < 3) {
+      console.log(`Rate limited during research (attempt ${retryCount + 1}/3), waiting 30s...`);
       await delay(30000);
-      return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+      return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount, retryCount + 1);
     }
     throw new Error(`Research failed (${resp.status}): ${txt}`);
   }
@@ -161,7 +187,8 @@ async function callGeminiFlash(
   apiKey: string,
   model: string,
   prompt: string,
-  systemInstruction?: string
+  systemInstruction?: string,
+  retryCount = 0
 ): Promise<string> {
   const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
   const body: Record<string, unknown> = {
@@ -181,10 +208,10 @@ async function callGeminiFlash(
   if (!resp.ok) {
     const txt = await resp.text();
     console.error(`Gemini ${model} error:`, resp.status, txt);
-    if (resp.status === 429) {
-      console.log("Rate limited, waiting 30s...");
+    if (resp.status === 429 && retryCount < 3) {
+      console.log(`Rate limited (attempt ${retryCount + 1}/3), waiting 30s...`);
       await delay(30000);
-      return callGeminiFlash(apiKey, model, prompt, systemInstruction);
+      return callGeminiFlash(apiKey, model, prompt, systemInstruction, retryCount + 1);
     }
     throw new Error(`Gemini ${model} error (${resp.status}): ${txt}`);
   }
@@ -552,9 +579,12 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
     details: detailsMap,
   }).eq("id", runId);
 
-  // Phase F: Start generating Batch 1 articles via self-chaining
-  console.log("Phase F: Starting Batch 1 article generation (self-chaining)...");
-  selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
+  // Phase F: Start generating Batch 1 articles via parallel self-chaining
+  const parallelism = Math.min(3, batch1Items.length, 5);
+  console.log(`Phase F: Starting Batch 1 article generation (${parallelism} parallel chains)...`);
+  for (let i = 0; i < parallelism; i++) {
+    selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
+  }
 }
 
 // ── Overflow Batch Processing ─────────────────────────────────────
@@ -583,9 +613,12 @@ async function runOverflowBatch(
     return;
   }
 
-  console.log(`Processing ${count} pending items for batch ${batch} via self-chaining`);
+  const parallelism = Math.min(3, count, 5);
+  console.log(`Processing ${count} pending items for batch ${batch} (${parallelism} parallel chains)...`);
   await db.from("nightly_builder_runs").update({ status: "generating" }).eq("id", runId);
-  selfInvoke({ action: "generate_one", runId, batch, runDate: today });
+  for (let i = 0; i < parallelism; i++) {
+    selfInvoke({ action: "generate_one", runId, batch, runDate: today });
+  }
 }
 
 // ── Article Generation from Queue (one at a time, self-chaining) ──
@@ -614,6 +647,27 @@ async function generateOneFromQueue(
     return;
   }
 
+  // Recover stale "processing" nightly items from crashed chains
+  const { data: staleItems } = await db.from("nightly_builder_queue")
+    .select("id, topic")
+    .eq("status", "processing")
+    .eq("run_date", runDate)
+    .eq("batch_number", batch);
+
+  if (staleItems && staleItems.length > 0) {
+    console.log(`Recovering ${staleItems.length} stale nightly items...`);
+    for (const si of staleItems) {
+      const searchTerm = si.topic.substring(0, 40).replace(/[%_]/g, "");
+      const { data: existing } = await db.from("articles")
+        .select("id").ilike("title", `%${searchTerm}%`).limit(1);
+      if (existing && existing.length > 0) {
+        await db.from("nightly_builder_queue").update({ status: "completed", article_id: existing[0].id }).eq("id", si.id);
+      } else {
+        await db.from("nightly_builder_queue").update({ status: "pending" }).eq("id", si.id);
+      }
+    }
+  }
+
   // Fetch ONE pending queue item
   const { data: queueItems } = await db.from("nightly_builder_queue")
     .select("*")
@@ -636,8 +690,18 @@ async function generateOneFromQueue(
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Mark queue item as processing
-  await db.from("nightly_builder_queue").update({ status: "processing" }).eq("id", item.id);
+  // Atomically claim the item (prevents double-processing by parallel chains)
+  const { data: claimed } = await db.from("nightly_builder_queue")
+    .update({ status: "processing" })
+    .eq("id", item.id)
+    .eq("status", "pending")
+    .select();
+
+  if (!claimed || claimed.length === 0) {
+    console.log(`Item "${item.topic}" already claimed by another chain, trying next...`);
+    selfInvoke({ action: "generate_one", runId, batch, runDate });
+    return;
+  }
 
   try {
     console.log(`Generating article: "${item.topic}"`);
@@ -713,21 +777,30 @@ async function generateOneFromQueue(
     }).eq("id", runId);
   }
 
-  // Self-chain: check if there are more items
+  // Self-chain: check if there are more items (include processing for stale recovery)
   const { count: remaining } = await db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
     .eq("run_date", runDate)
     .eq("batch_number", batch)
-    .eq("status", "pending");
+    .in("status", ["pending", "processing"]);
 
   if (remaining && remaining > 0) {
-    console.log(`Self-invoking for next article (${remaining} remaining)...`);
+    console.log(`Self-invoking for next article (${remaining} remaining/recoverable)...`);
     selfInvoke({ action: "generate_one", runId, batch, runDate });
   } else {
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
     }).eq("id", runId);
+
+    // Calculate and set next_run_at
+    try {
+      const nextRun = calculateNextRunAt();
+      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
+    } catch (e) {
+      console.error("Failed to set next_run_at:", e);
+    }
+
     console.log(`Batch ${batch} complete.`);
   }
 }
@@ -906,18 +979,20 @@ serve(async (req) => {
   }
 
   try {
-    // Auth: require service-role key, admin user, OR allow headerless calls from pg_cron
+    // Auth: require service-role key, anon key (cron), admin user, OR headerless calls
     const authHeader = req.headers.get("Authorization");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
 
     if (authHeader) {
       const token = authHeader.replace("Bearer ", "");
 
-      if (token !== serviceKey) {
+      // Allow service role key and anon key (used by pg_cron) without further checks
+      if (token !== serviceKey && token !== anonKey) {
         // Verify admin user
         const userClient = createClient(
           Deno.env.get("SUPABASE_URL")!,
-          Deno.env.get("SUPABASE_ANON_KEY")!,
+          anonKey,
           { global: { headers: { Authorization: authHeader } } }
         );
         const { data: { user }, error } = await userClient.auth.getUser();
@@ -932,8 +1007,7 @@ serve(async (req) => {
         if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
       }
     }
-    // Note: headerless calls are allowed — pg_cron/pg_net cannot send auth headers easily
-    // The function is not publicly discoverable and verify_jwt=false handles this
+    // Note: headerless calls are also allowed for pg_cron/pg_net
 
     const body = await req.json().catch(() => ({}));
 
@@ -983,16 +1057,25 @@ serve(async (req) => {
     const batch = body.batch || 1;
     console.log(`Nightly Builder triggered for batch ${batch}`);
 
-    // Run the research/setup phase, which will self-chain into generation
-    try {
-      await runNightlyBuilder(batch);
-    } catch (e) {
-      console.error("Nightly builder execution error:", e);
-    }
+    // Fire-and-forget: run research phase in background so response returns immediately
+    EdgeRuntime.waitUntil(
+      runNightlyBuilder(batch)
+        .then(async () => {
+          // Update next_run_at after successful run
+          try {
+            const db = serviceClient();
+            const nextRun = calculateNextRunAt();
+            await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
+          } catch (e) {
+            console.error("Failed to update next_run_at:", e);
+          }
+        })
+        .catch(e => console.error("Nightly builder execution error:", e))
+    );
 
     return jsonResp({
       success: true,
-      message: `Nightly builder batch ${batch} started`,
+      message: `Nightly builder batch ${batch} triggered (running in background)`,
       batch,
     });
   } catch (err) {
