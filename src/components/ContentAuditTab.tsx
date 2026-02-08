@@ -103,70 +103,73 @@ export default function ContentAuditTab() {
     if (count !== null) setTotalArticles(count);
   }, []);
 
-  // Fix all for a specific run — resumable, persisted in DB
+  // Fix all for a specific run — fires server-side edge function, polls DB for progress
   const triggerFixAllForRun = useCallback(async (runId: string) => {
-    // Mark run as "fixing" in DB so we can resume after refresh
-    await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixing" }).eq("id", runId);
+    setFixingAll(true);
+    setFixAllProgress("Starting fix all...");
 
-    const { data: findingsData } = await supabase
-      .from("content_audit_findings")
-      .select("*")
-      .eq("run_id", runId)
-      .neq("status", "resolved")
-      .not("article_id", "is", null)
-      .not("suggestion", "is", null);
+    try {
+      // Fire the server-side fix_all action (don't await — it may take long)
+      supabase.functions.invoke("ai-content-audit", {
+        body: { action: "fix_all", runId },
+      }).then(() => {
+        console.log("Fix all server call completed");
+      }).catch((err) => {
+        console.error("Fix all server error:", err);
+      });
 
-    const fixable = (findingsData || []) as unknown as AuditFinding[];
-    if (fixable.length === 0) {
-      await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixed" }).eq("id", runId);
-      toast({ title: "Fix All Complete", description: "No more issues to fix." });
+      // Poll DB for progress until fix_all_status changes to "fixed"
+      const pollForCompletion = async () => {
+        let attempts = 0;
+        const maxAttempts = 300; // 5 min max poll
+        while (attempts < maxAttempts) {
+          await new Promise(r => setTimeout(r, 3000));
+          attempts++;
+
+          const { data: run } = await (supabase.from("content_audit_runs") as any)
+            .select("fix_all_status, auto_fixes_applied")
+            .eq("id", runId)
+            .single();
+
+          if (!run) break;
+
+          // Count remaining open findings for progress
+          const { count } = await supabase
+            .from("content_audit_findings")
+            .select("*", { count: "exact", head: true })
+            .eq("run_id", runId)
+            .neq("status", "resolved")
+            .not("article_id", "is", null)
+            .not("suggestion", "is", null);
+
+          const remaining = count ?? 0;
+          const fixed = run.auto_fixes_applied ?? 0;
+          setFixAllProgress(`Fixed ${fixed}, ${remaining} remaining...`);
+
+          // Refresh findings list
+          fetchFindings(runId);
+
+          if (run.fix_all_status === "fixed" || run.fix_all_status === null) {
+            break;
+          }
+        }
+      };
+
+      await pollForCompletion();
+
+      toast({ title: "Fix All Complete", description: "All fixable issues have been processed server-side." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Fix all failed";
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
       setFixingAll(false);
       setFixAllProgress("");
-      return;
+      fetchRuns();
+      if (selectedRunId) fetchFindings(selectedRunId);
     }
+  }, [toast, fetchFindings, fetchRuns, selectedRunId]);
 
-    setFixingAll(true);
-    let fixed = 0;
-    let failed = 0;
-    for (const finding of fixable) {
-      // Re-check if still open (might have been fixed already)
-      const { data: current } = await supabase
-        .from("content_audit_findings")
-        .select("status")
-        .eq("id", finding.id)
-        .single();
-      if (current?.status === "resolved") {
-        fixed++;
-        continue;
-      }
-
-      setFixAllProgress(`Fixing ${fixed + failed + 1}/${fixable.length}...`);
-      try {
-        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
-          body: { action: "apply_fix", findingId: finding.id },
-        });
-        if (error) throw error;
-        if (data?.error) throw new Error(data.error);
-        fixed++;
-        fetchFindings(runId);
-      } catch {
-        failed++;
-      }
-    }
-
-    // Mark as completed
-    await (supabase.from("content_audit_runs") as any).update({ fix_all_status: "fixed" }).eq("id", runId);
-
-    toast({
-      title: "Fix All Complete",
-      description: `Fixed ${fixed} of ${fixable.length} issues${failed > 0 ? ` (${failed} failed)` : ""}.`,
-    });
-    setFixingAll(false);
-    setFixAllProgress("");
-    fetchRuns();
-  }, [toast, fetchFindings, fetchRuns]);
-
-  // Initial load + cleanup stale runs + resume fix-all
+  // Initial load + cleanup stale runs + check if fix-all is running
   useEffect(() => {
     const init = async () => {
       await fetchTotalArticles();
@@ -182,7 +185,7 @@ export default function ContentAuditTab() {
 
       await fetchRuns();
 
-      // Resume fix-all if it was in progress
+      // Check if a fix-all is currently running server-side, and poll for it
       const { data: fixingRun } = await (supabase.from("content_audit_runs") as any)
         .select("id")
         .eq("fix_all_status", "fixing")
@@ -192,6 +195,7 @@ export default function ContentAuditTab() {
 
       if (fixingRun) {
         setSelectedRunId(fixingRun.id);
+        // Just poll — the server is already doing the work
         triggerFixAllForRun(fixingRun.id);
       }
     };

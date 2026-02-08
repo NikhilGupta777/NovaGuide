@@ -490,10 +490,14 @@ serve(async (req) => {
       return jsonResp({ success: true, ...result });
     }
 
-    // Handle "fix all" action - fix all open findings with suggestions
+    // Handle "fix all" action - runs entirely server-side, updates DB for progress
     if (body.action === "fix_all" && body.runId) {
       console.log(`Fixing all open findings for run: ${body.runId}`);
       const db = serviceClient();
+
+      // Mark run as fixing
+      await db.from("content_audit_runs").update({ fix_all_status: "fixing" }).eq("id", body.runId);
+
       const { data: openFindings } = await db.from("content_audit_findings")
         .select("id, article_id, suggestion")
         .eq("run_id", body.runId)
@@ -502,25 +506,37 @@ serve(async (req) => {
         .not("suggestion", "is", null);
 
       if (!openFindings || openFindings.length === 0) {
+        await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", body.runId);
         return jsonResp({ success: true, fixed: 0, message: "No fixable findings found" });
       }
 
-      let fixed = 0;
-      let failed = 0;
-      for (const finding of openFindings) {
-        try {
-          await applyFixToArticle(finding.id);
-          fixed++;
-          console.log(`Fixed ${fixed}/${openFindings.length}`);
-          // Rate limit between fixes
-          if (fixed < openFindings.length) await delay(2000);
-        } catch (err) {
-          console.error(`Failed to fix finding ${finding.id}:`, err);
-          failed++;
+      // Fire-and-forget: respond immediately, process in background
+      const backgroundWork = (async () => {
+        let fixed = 0;
+        let failed = 0;
+        for (const finding of openFindings) {
+          try {
+            await applyFixToArticle(finding.id);
+            fixed++;
+            console.log(`Fixed ${fixed}/${openFindings.length}`);
+            // Update auto_fixes_applied count on the run for progress tracking
+            await db.from("content_audit_runs").update({
+              auto_fixes_applied: fixed,
+            }).eq("id", body.runId);
+            if (fixed < openFindings.length) await delay(2000);
+          } catch (err) {
+            console.error(`Failed to fix finding ${finding.id}:`, err);
+            failed++;
+          }
         }
-      }
+        await db.from("content_audit_runs").update({ fix_all_status: "fixed" }).eq("id", body.runId);
+        console.log(`Fix all complete: ${fixed} fixed, ${failed} failed out of ${openFindings.length}`);
+      })();
 
-      return jsonResp({ success: true, fixed, failed, total: openFindings.length, message: `Fixed ${fixed} of ${openFindings.length} issues` });
+      // Keep the function alive until background work completes
+      await backgroundWork;
+
+      return jsonResp({ success: true, message: "Fix all completed server-side" });
     }
 
     const autoFix = body.autoFix !== false;
