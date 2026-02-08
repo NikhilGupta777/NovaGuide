@@ -114,19 +114,24 @@ async function analyzeArticlesBatch(
 2. **wording** - Awkward phrasing, unclear sentences, or jargon without explanation
 3. **seo** - Missing or poor SEO (title too long/short, weak excerpt, missing structure, duplicate H1)
 4. **factual** - Potentially outdated or incorrect information, speculative future dates
-5. **quality** - Low quality content, too short, incomplete, or lacks depth
+5. **quality** - Low quality content, too short, incomplete, or lacks depth (includes truncated/cut-off content)
 6. **formatting** - Poor markdown formatting, missing headers, walls of text
+
+IMPORTANT RULES:
+- Do NOT report the same issue under multiple categories. Each problem should only appear ONCE under the MOST appropriate category.
+- If content is truncated/cut-off/incomplete, report it ONLY as "quality" (not also as "formatting").
+- If an article has both formatting AND quality issues for the same truncation, merge them into ONE "quality" finding.
 
 For each issue found, specify:
 - type: one of the above categories
 - severity: "critical" (must fix), "warning" (should fix), or "info" (nice to fix)
 - description: what the specific issue is (be concrete, quote the problematic text)
 - suggestion: exactly how to fix it (be specific and actionable)
-- autoFixable: true ONLY for simple grammar fixes, typo corrections, or minor wording improvements
+- autoFixable: true ONLY for simple grammar fixes, typo corrections, or minor wording improvements. NEVER mark "quality" issues (incomplete/truncated content) as autoFixable.
 
 Return ONLY a valid JSON array where each element has "articleId" (string) and "issues" (array of issue objects).
 If an article has no issues, include it with an empty issues array.
-Be thorough but avoid false positives.`;
+Be thorough but avoid false positives and duplicate findings.`;
 
   const result = await callAI(apiKey, `Analyze these articles for issues:\n\n${articlesText}`, systemPrompt);
 
@@ -408,13 +413,63 @@ async function applyFixToArticle(findingId: string) {
 
   if (!article) throw new Error("Article not found");
 
-  const systemPrompt = `You are a careful editor. Apply the specific fix described below to this article. Maintain the overall tone and structure. Return a JSON object with:
+  // Detect if this is a truncated/incomplete article issue
+  const isTruncationIssue = finding.issue_type === "quality" && (
+    finding.description.toLowerCase().includes("incomplete") ||
+    finding.description.toLowerCase().includes("truncat") ||
+    finding.description.toLowerCase().includes("cut off") ||
+    finding.description.toLowerCase().includes("cuts off") ||
+    finding.description.toLowerCase().includes("abruptly ends") ||
+    finding.description.toLowerCase().includes("mid-sentence") ||
+    finding.description.toLowerCase().includes("mid-header")
+  );
+
+  let systemPrompt: string;
+  let prompt: string;
+
+  if (isTruncationIssue) {
+    // For truncated articles, regenerate the FULL content
+    systemPrompt = `You are an expert tech writer. The article below is TRUNCATED/INCOMPLETE — its content was cut off during generation. You must COMPLETE it fully.
+
+CRITICAL INSTRUCTIONS:
+- Write the COMPLETE article from start to finish based on the title and excerpt
+- The article MUST fulfill everything promised in the title and excerpt
+- Use proper markdown formatting with ## for main sections
+- Include all steps, tips, and explanations mentioned in the title
+- Make it comprehensive, well-structured, and at least 1500 words
+- Do NOT start content with an H1 heading (the title serves as H1)
+- Start with a compelling introduction paragraph
+
+Return a JSON object with:
+- "title": the article title (keep the same)
+- "content": the COMPLETE article content in markdown
+- "excerpt": a compelling excerpt (1-2 sentences)
+- "fixDescription": "Regenerated complete article content to replace truncated version"`;
+
+    prompt = `Article Title: ${article.title}
+Excerpt: ${article.excerpt || "None"}
+
+Current TRUNCATED content (this is incomplete and needs to be fully rewritten):
+${(article.content || "").substring(0, 2000)}
+
+Issue: ${finding.description}
+
+Write the COMPLETE article from scratch. Return as JSON.`;
+  } else {
+    systemPrompt = `You are a careful editor. Apply the specific fix described below to this article. Maintain the overall tone and structure.
+
+CRITICAL: You MUST actually make changes to fix the issue. If the issue describes a real problem, fix it. Do NOT claim "no changes needed" — that means you failed to fix it.
+- Do NOT add placeholder citations like [Source 1] or [Source 2] — either find real sources or remove unsourced claims
+- Do NOT add H1 headings to content (the article title serves as H1)
+
+Return a JSON object with:
 - "title": corrected title
 - "content": corrected FULL content (not just the changed parts)
-- "excerpt": corrected excerpt
-- "fixDescription": one sentence describing what you changed`;
+- "excerpt": corrected excerpt  
+- "fixDescription": one sentence describing what you ACTUALLY changed (must describe a real change, not "no changes were necessary")
+- "changesApplied": true if you made actual changes, false if no changes were needed`;
 
-  const prompt = `Article Title: ${article.title}
+    prompt = `Article Title: ${article.title}
 Excerpt: ${article.excerpt || "None"}
 Content:
 ${article.content || ""}
@@ -423,6 +478,7 @@ Issue: ${finding.description}
 Suggestion: ${finding.suggestion}
 
 Apply this fix and return the corrected article as JSON.`;
+  }
 
   const result = await callAI(apiKey, prompt, systemPrompt);
 
@@ -435,18 +491,26 @@ Apply this fix and return the corrected article as JSON.`;
   if (fixed.content && fixed.content !== article.content) updatePayload.content = fixed.content;
   if (fixed.excerpt && fixed.excerpt !== article.excerpt) updatePayload.excerpt = fixed.excerpt;
 
-  if (Object.keys(updatePayload).length > 0) {
+  const actuallyChanged = Object.keys(updatePayload).length > 0;
+
+  if (actuallyChanged) {
     await db.from("articles").update(updatePayload).eq("id", article.id);
+    // Mark finding as resolved only if we made real changes
+    await db.from("content_audit_findings").update({
+      status: "resolved",
+      auto_fixed: true,
+      fix_applied: fixed.fixDescription || "Applied AI-suggested fix",
+    }).eq("id", findingId);
+  } else {
+    // No changes made — mark as "skipped" not "resolved"
+    await db.from("content_audit_findings").update({
+      fix_applied: "No changes could be applied — manual review needed",
+      status: "open", // Keep open so user knows it needs attention
+    }).eq("id", findingId);
+    console.log(`No actual changes for finding ${findingId} — keeping open`);
   }
 
-  // Mark finding as resolved
-  await db.from("content_audit_findings").update({
-    status: "resolved",
-    auto_fixed: true,
-    fix_applied: fixed.fixDescription || "Applied AI-suggested fix",
-  }).eq("id", findingId);
-
-  return { fixed: Object.keys(updatePayload).length > 0, description: fixed.fixDescription };
+  return { fixed: actuallyChanged, description: fixed.fixDescription };
 }
 
 // ── HTTP Handler ──────────────────────────────────────────────────
