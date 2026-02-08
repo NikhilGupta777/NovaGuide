@@ -732,12 +732,60 @@ async function generateOneFromQueue(
   }
 }
 
+// ── Recover stale "processing" items ─────────────────────────────
+// Items stuck in "processing" from a previous chain that died (function timeout, crash, etc.)
+// We check if ai-agent actually finished creating an article for the topic.
+
+async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
+  // Get ALL "processing" manual batch items
+  const { data: staleItems } = await db.from("nightly_builder_queue")
+    .select("id, topic")
+    .eq("status", "processing")
+    .is("run_date", null);
+
+  if (!staleItems || staleItems.length === 0) return 0;
+
+  console.log(`Found ${staleItems.length} items stuck in "processing" — recovering...`);
+  let recovered = 0;
+
+  for (const item of staleItems) {
+    // Check if ai-agent actually created an article for this topic
+    // Use a fuzzy match on the first 40 chars of the topic
+    const searchTerm = item.topic.substring(0, 40).replace(/[%_]/g, "");
+    const { data: existingArticle } = await db.from("articles")
+      .select("id")
+      .ilike("title", `%${searchTerm}%`)
+      .limit(1);
+
+    if (existingArticle && existingArticle.length > 0) {
+      // Article exists — ai-agent finished even though we timed out
+      await db.from("nightly_builder_queue").update({
+        status: "completed",
+        article_id: existingArticle[0].id,
+      }).eq("id", item.id);
+      console.log(`Recovered "${item.topic}" — article already exists (${existingArticle[0].id})`);
+    } else {
+      // No article — reset to pending for retry
+      await db.from("nightly_builder_queue").update({
+        status: "pending",
+      }).eq("id", item.id);
+      console.log(`Reset "${item.topic}" back to pending for retry`);
+    }
+    recovered++;
+  }
+
+  return recovered;
+}
+
 // ── Generate from manual batch queue (no run_date) ───────────────
 
 async function generateOneFromManualQueue(autoPublish: boolean) {
   const db = serviceClient();
 
-  // Fetch ONE pending manual queue item (run_date is null)
+  // Step 1: Recover any stale "processing" items from previous dead chains
+  await recoverStaleManualItems(db);
+
+  // Step 2: Fetch ONE pending manual queue item (run_date is null)
   const { data: queueItems } = await db.from("nightly_builder_queue")
     .select("*")
     .eq("status", "pending")
@@ -755,8 +803,19 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Mark as processing
-  await db.from("nightly_builder_queue").update({ status: "processing" }).eq("id", item.id);
+  // Step 3: Atomically claim the item (prevents double-processing by parallel chains)
+  const { data: claimed } = await db.from("nightly_builder_queue")
+    .update({ status: "processing" })
+    .eq("id", item.id)
+    .eq("status", "pending")  // Only claim if still pending
+    .select();
+
+  if (!claimed || claimed.length === 0) {
+    // Another chain already claimed this item — skip and try next
+    console.log(`Item "${item.topic}" already claimed by another chain, trying next...`);
+    selfInvoke({ action: "generate_manual_batch", autoPublish });
+    return;
+  }
 
   try {
     console.log(`Manual batch: generating "${item.topic}"`);
@@ -786,6 +845,7 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
         status: "skipped",
         error_message: agentData.reason,
       }).eq("id", item.id);
+      console.log(`Skipped: "${item.topic}" — ${agentData.reason}`);
     } else if (agentData.error) {
       throw new Error(agentData.error);
     } else {
@@ -794,12 +854,14 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
         status: "completed",
         article_id: articleId || null,
       }).eq("id", item.id);
+      console.log(`Completed: "${item.topic}" → article ${articleId}`);
 
       if (autoPublish && articleId) {
         await db.from("articles").update({
           status: "published",
           published_at: new Date().toISOString(),
         }).eq("id", articleId);
+        console.log(`Auto-published: "${item.topic}"`);
       }
     }
   } catch (err) {
@@ -810,18 +872,30 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
     }).eq("id", item.id);
   }
 
-  // Self-chain for next item
-  const { count: remaining } = await db.from("nightly_builder_queue")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "pending")
-    .is("run_date", null);
+  // Step 4: ALWAYS self-chain for next item
+  selfChainManualBatch(autoPublish);
+}
 
-  if (remaining && remaining > 0) {
-    console.log(`Self-invoking for next manual batch item (${remaining} remaining)...`);
-    selfInvoke({ action: "generate_manual_batch", autoPublish });
-  } else {
-    console.log("Manual batch complete.");
-  }
+// ── Self-chain helper for manual batch ───────────────────────────
+
+function selfChainManualBatch(autoPublish: boolean) {
+  const db = serviceClient();
+  db.from("nightly_builder_queue")
+    .select("*", { count: "exact", head: true })
+    .in("status", ["pending", "processing"])  // Include processing — they may be stale and will be recovered
+    .is("run_date", null)
+    .then(({ count }) => {
+      if (count && count > 0) {
+        console.log(`Self-invoking for next manual batch item (${count} remaining/recoverable)...`);
+        selfInvoke({ action: "generate_manual_batch", autoPublish });
+      } else {
+        console.log("Manual batch fully complete — all items processed.");
+      }
+    })
+    .catch(err => {
+      console.error("Error checking remaining items, self-invoking anyway as safety:", err);
+      selfInvoke({ action: "generate_manual_batch", autoPublish });
+    });
 }
 
 // ── HTTP Handler ──────────────────────────────────────────────────
@@ -877,9 +951,21 @@ serve(async (req) => {
       return jsonResp({ success: true });
     }
 
-    // Start manual batch processing (from AIAgentPanel)
+    // Start manual batch processing (from AIAgentPanel or auto-discover)
     if (body.action === "start_manual_batch") {
-      console.log("Starting manual batch generation (self-chaining)...");
+      // Check if there are any pending manual items to process
+      const checkDb = serviceClient();
+      const { count: pendingCount } = await checkDb.from("nightly_builder_queue")
+        .select("*", { count: "exact", head: true })
+        .in("status", ["pending", "processing"])
+        .is("run_date", null);
+
+      if (!pendingCount || pendingCount === 0) {
+        console.log("No manual batch items to process.");
+        return jsonResp({ success: true, message: "No items to process" });
+      }
+
+      console.log(`Starting manual batch generation (${pendingCount} items, self-chaining)...`);
       selfInvoke({ action: "generate_manual_batch", autoPublish: body.autoPublish || false });
       return jsonResp({ success: true, message: "Manual batch started in background" });
     }
