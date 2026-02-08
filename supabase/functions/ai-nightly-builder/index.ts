@@ -8,8 +8,16 @@ const corsHeaders = {
 };
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const MODEL_FLASH = "gemini-2.5-flash";
+
+// ── Optimal Model Strategy (upgraded) ─────────────────────────────
+// Deep Research: topic discovery via Interactions API (best research quality)
+const DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025";
+// Gemini 2.5 Flash Lite: cheapest for parsing/dedup (4K RPM, Unlimited RPD)
 const MODEL_LITE = "gemini-2.5-flash-lite";
+// Gemini 2.5 Flash: category creation, fallback research (1K RPM, 10K RPD)
+const MODEL_FLASH = "gemini-2.5-flash";
+// Gemini 3 Flash: scoring tasks (1K RPM, 10K RPD)
+const MODEL_SCORING = "gemini-3-flash-preview";
 
 // Safe icons that exist in the frontend iconMap
 const SAFE_ICONS = [
@@ -26,8 +34,6 @@ function serviceClient() {
 }
 
 // ── Helper: Get IST date string (UTC+5:30) ───────────────────────
-// All batches use IST date so batch 1 (18:30 UTC) and batch 2 (06:30 UTC next day)
-// agree on the same "day" (Bug 1 fix)
 function getISTDateString(): string {
   const now = new Date();
   const istOffsetMs = 5.5 * 60 * 60 * 1000;
@@ -36,7 +42,6 @@ function getISTDateString(): string {
 }
 
 // ── Self-Chaining: fire-and-forget call to ourselves ─────────────
-// Bug 4 fix: consume response body to avoid resource leaks
 function selfInvoke(body: Record<string, unknown>) {
   const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ai-nightly-builder`;
   fetch(url, {
@@ -47,7 +52,7 @@ function selfInvoke(body: Record<string, unknown>) {
     },
     body: JSON.stringify(body),
   })
-    .then(r => r.text()) // consume response body to prevent resource leaks
+    .then(r => r.text())
     .catch(err => console.error("Self-invoke failed:", err));
 }
 
@@ -68,7 +73,6 @@ function calculateNextRunAt(): string {
   const now = new Date();
   const utcH = now.getUTCHours();
   const utcM = now.getUTCMinutes();
-  // Cron times in UTC: 06:30 (12PM IST), 12:30 (6PM IST), 18:30 (12AM IST)
   const cronTimesUTC = [
     { h: 6, m: 30 },
     { h: 12, m: 30 },
@@ -87,7 +91,9 @@ function calculateNextRunAt(): string {
   return next.toISOString();
 }
 
-// ── Deep Research via Gemini Flash + Google Search Grounding ──────
+// ── Deep Research via Interactions API ────────────────────────────
+// Uses deep-research-pro-preview agent for superior web research
+// 1 RPM limit — we space calls 65s apart between categories
 
 async function deepResearchCategory(
   apiKey: string,
@@ -97,41 +103,226 @@ async function deepResearchCategory(
   topicsCount: number,
   retryCount = 0
 ): Promise<string[]> {
-  console.log(`Deep researching category: ${categoryName}`);
+  console.log(`[Deep Research] Starting for category: ${categoryName}`);
+
+  const existingList = existingTitles.length > 0
+    ? `\n\nEXISTING ARTICLES (do NOT suggest duplicates):\n${existingTitles.slice(0, 100).map((t, i) => `${i + 1}. ${t}`).join("\n")}`
+    : "";
+
+  const researchPrompt = `Research the most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}" (${categoryDescription || "tech help"}) in the tech/digital help space.
+
+Focus on:
+- Questions real people ask on Google, Reddit, Quora, forums
+- Common problems and troubleshooting guides  
+- Step-by-step how-to guides
+- Beginner-friendly topics that get high search volume
+- Recent/trending topics (2024-2026)
+
+Find at least ${topicsCount} unique, specific, searchable topics. Each should be a clear question or how-to title like "How to reset iPhone password" or "Fix slow WiFi connection on Windows 11".${existingList}
+
+Return a comprehensive numbered list of ${topicsCount} topics.`;
+
+  try {
+    // Step 1: Start Deep Research interaction (background mode)
+    const startUrl = `${GEMINI_BASE}/interactions?key=${apiKey}`;
+    const startResp = await fetch(startUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: researchPrompt,
+        agent: DEEP_RESEARCH_AGENT,
+        background: true,
+      }),
+    });
+
+    if (!startResp.ok) {
+      const errText = await startResp.text();
+      console.error(`[Deep Research] Start failed for ${categoryName}:`, startResp.status, errText);
+      if (startResp.status === 429 && retryCount < 2) {
+        console.log(`[Deep Research] Rate limited (attempt ${retryCount + 1}/2), waiting 65s...`);
+        await delay(65000);
+        return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount, retryCount + 1);
+      }
+      // Fallback to Flash + Google Search grounding
+      console.log(`[Deep Research] Falling back to Flash + Search grounding for ${categoryName}`);
+      return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+    }
+
+    const startData = await startResp.json();
+    const interactionId = startData.name || startData.id;
+
+    if (!interactionId) {
+      console.error("[Deep Research] No interaction ID returned, falling back");
+      return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+    }
+
+    console.log(`[Deep Research] Started interaction ${interactionId} for ${categoryName}`);
+
+    // Step 2: Poll for results (max 10 minutes per category)
+    const maxPollTime = 10 * 60 * 1000; // 10 minutes
+    const pollInterval = 15000; // 15 seconds
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxPollTime) {
+      await delay(pollInterval);
+
+      const pollUrl = `${GEMINI_BASE}/interactions/${interactionId}?key=${apiKey}`;
+      const pollResp = await fetch(pollUrl, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!pollResp.ok) {
+        const errText = await pollResp.text();
+        console.error(`[Deep Research] Poll error for ${categoryName}:`, pollResp.status, errText);
+        // Don't fail immediately — might be transient
+        continue;
+      }
+
+      const pollData = await pollResp.json();
+      const status = pollData.status;
+
+      console.log(`[Deep Research] ${categoryName}: status=${status} (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
+
+      if (status === "completed" || status === "COMPLETED") {
+        // Extract the research report text
+        let reportText = "";
+        if (pollData.output?.content?.parts) {
+          reportText = pollData.output.content.parts
+            .map((p: { text?: string }) => p.text || "")
+            .join("");
+        } else if (pollData.output?.text) {
+          reportText = pollData.output.text;
+        } else if (typeof pollData.output === "string") {
+          reportText = pollData.output;
+        }
+
+        if (!reportText || reportText.length < 100) {
+          console.error(`[Deep Research] Empty report for ${categoryName}, falling back`);
+          return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+        }
+
+        console.log(`[Deep Research] Got report for ${categoryName}: ${reportText.length} chars`);
+        // Parse the report into individual topics using Flash Lite
+        return parseResearchReport(apiKey, reportText, topicsCount, categoryName);
+      }
+
+      if (status === "failed" || status === "FAILED") {
+        const errMsg = pollData.error?.message || pollData.error || "Unknown error";
+        console.error(`[Deep Research] Failed for ${categoryName}: ${errMsg}`);
+        return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+      }
+    }
+
+    // Timed out
+    console.error(`[Deep Research] Timed out for ${categoryName} after ${maxPollTime / 1000}s, falling back`);
+    return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+
+  } catch (err) {
+    console.error(`[Deep Research] Error for ${categoryName}:`, err);
+    if (retryCount < 1) {
+      await delay(10000);
+      return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount, retryCount + 1);
+    }
+    return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount);
+  }
+}
+
+// ── Parse Deep Research report into topics (Flash Lite) ──────────
+
+async function parseResearchReport(
+  apiKey: string,
+  report: string,
+  topicsCount: number,
+  categoryName: string,
+): Promise<string[]> {
+  console.log(`[Parse] Extracting topics from Deep Research report for ${categoryName}`);
+
+  const parsePrompt = `Extract exactly ${topicsCount} specific, searchable tech help topics from this research report. Each topic should be a clear question or how-to title.
+
+RESEARCH REPORT:
+${report.substring(0, 30000)}
+
+Return ONLY a valid JSON array of strings. Each string should be a specific, actionable question or how-to title.
+Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
+
+  const url = `${GEMINI_BASE}/models/${MODEL_LITE}:generateContent?key=${apiKey}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
+      generationConfig: { temperature: 0.3 },
+      systemInstruction: { parts: [{ text: "Extract topics from research and return as a JSON array of strings. No markdown, no explanation." }] },
+    }),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error(`[Parse] Error:`, resp.status, txt);
+    return [];
+  }
+
+  const data = await resp.json();
+  const candidates = data.candidates || [];
+  if (!candidates[0]?.content?.parts) return [];
+  const responseText = candidates[0].content.parts.map((p: { text?: string }) => p.text || "").join("");
+
+  let topics: string[] = [];
+  try {
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      topics = JSON.parse(jsonMatch[0]);
+    }
+  } catch (e) {
+    console.error("[Parse] JSON parse error:", e);
+  }
+
+  topics = topics.filter(t => typeof t === "string" && t.trim().length > 10);
+  console.log(`[Parse] ${categoryName}: extracted ${topics.length} topics`);
+  return topics;
+}
+
+// ── Fallback: Flash + Google Search Grounding ────────────────────
+// Used when Deep Research fails, times out, or hits rate limits
+
+async function fallbackResearchCategory(
+  apiKey: string,
+  categoryName: string,
+  categoryDescription: string,
+  existingTitles: string[],
+  topicsCount: number,
+  retryCount = 0
+): Promise<string[]> {
+  console.log(`[Fallback Research] Using Flash + Search for ${categoryName}`);
 
   const prompt = `You are researching for a tech help website called DigitalHelp.
 
 CATEGORY: ${categoryName}
 DESCRIPTION: ${categoryDescription || "General tech help articles"}
 
-EXISTING ARTICLES IN THIS CATEGORY (do NOT suggest these again):
-${existingTitles.length > 0 ? existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
+EXISTING ARTICLES (do NOT suggest these again):
+${existingTitles.length > 0 ? existingTitles.slice(0, 100).map((t, i) => `${i + 1}. ${t}`).join("\n") : "None yet"}
 
-YOUR TASK:
-Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics that people search for online related to "${categoryName}" in the tech/digital help space.
+Find the top ${topicsCount} most commonly searched questions, problems, and how-to topics related to "${categoryName}" in the tech/digital help space.
 
 Focus on:
 - Questions real people ask on Google, Reddit, Quora, forums
 - Common problems and troubleshooting guides
 - Step-by-step how-to guides
-- Beginner-friendly topics that get high search volume
+- Beginner-friendly topics with high search volume
 - Recent/trending topics (2024-2026)
 
-IMPORTANT: Do NOT include any topics that are too similar to the existing articles listed above.
-
-Return ONLY a valid JSON array of strings with ${topicsCount} unique, specific questions/topics. Each should be a clear, searchable question or how-to title.
+Return ONLY a valid JSON array of strings with ${topicsCount} unique topics.
 Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 11"]`;
 
   const url = `${GEMINI_BASE}/models/${MODEL_FLASH}:generateContent?key=${apiKey}`;
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     tools: [{ google_search: {} }],
-    generationConfig: {
-      temperature: 0.4,
-      maxOutputTokens: 8192,
-    },
+    generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
     systemInstruction: {
-      parts: [{ text: "You are a research assistant that discovers trending tech help topics. Use web search to find real, commonly-asked questions. Return ONLY a JSON array of strings." }]
+      parts: [{ text: "You are a research assistant. Use web search to find real, commonly-asked questions. Return ONLY a JSON array of strings." }]
     },
   };
 
@@ -143,25 +334,21 @@ Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 1
 
   if (!resp.ok) {
     const txt = await resp.text();
-    console.error(`Research error for ${categoryName}:`, resp.status, txt);
+    console.error(`[Fallback] Error for ${categoryName}:`, resp.status, txt);
     if (resp.status === 429 && retryCount < 3) {
-      console.log(`Rate limited during research (attempt ${retryCount + 1}/3), waiting 30s...`);
+      console.log(`[Fallback] Rate limited (attempt ${retryCount + 1}/3), waiting 30s...`);
       await delay(30000);
-      return deepResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount, retryCount + 1);
+      return fallbackResearchCategory(apiKey, categoryName, categoryDescription, existingTitles, topicsCount, retryCount + 1);
     }
     throw new Error(`Research failed (${resp.status}): ${txt}`);
   }
 
   const data = await resp.json();
   const candidates = data.candidates || [];
-  if (!candidates[0]?.content?.parts) {
-    console.error("No content in research response");
-    return [];
-  }
+  if (!candidates[0]?.content?.parts) return [];
 
   const responseText = candidates[0].content.parts.map((p: { text?: string }) => p.text || "").join("");
 
-  // Parse JSON array from response
   let topics: string[] = [];
   try {
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
@@ -169,31 +356,27 @@ Example: ["How to reset iPhone password", "Fix slow WiFi connection on Windows 1
       topics = JSON.parse(jsonMatch[0]);
     }
   } catch (e) {
-    console.error("Failed to parse research topics JSON:", e);
-    console.log("Raw response:", responseText.substring(0, 500));
-
-    // Fallback: try to parse line-by-line
+    console.error("[Fallback] Parse error:", e);
+    // Second chance: use Lite to extract
     try {
-      const parsePrompt = `Extract all questions/topics from this text and return them as a JSON array of strings. Only include clear, specific questions or how-to topics.\n\nText:\n${responseText.substring(0, 12000)}\n\nReturn ONLY a valid JSON array.`;
-      const parsed = await callGeminiFlash(apiKey, MODEL_LITE, parsePrompt, "Return ONLY a JSON array of strings.");
+      const parsed = await callGeminiModel(apiKey, MODEL_LITE,
+        `Extract all questions/topics from this text as a JSON array of strings:\n\n${responseText.substring(0, 12000)}`,
+        "Return ONLY a JSON array of strings.");
       const fallbackMatch = parsed.match(/\[[\s\S]*\]/);
-      if (fallbackMatch) {
-        topics = JSON.parse(fallbackMatch[0]);
-      }
+      if (fallbackMatch) topics = JSON.parse(fallbackMatch[0]);
     } catch {
-      console.error("Fallback parsing also failed");
+      console.error("[Fallback] Second-chance parsing also failed");
     }
   }
 
-  // Filter out non-string items
   topics = topics.filter(t => typeof t === "string" && t.trim().length > 10);
-  console.log(`Category "${categoryName}": found ${topics.length} topics`);
+  console.log(`[Fallback] ${categoryName}: found ${topics.length} topics`);
   return topics;
 }
 
-// ── Gemini Flash Call (for parsing / dedup) ───────────────────────
+// ── Generic Gemini model call ────────────────────────────────────
 
-async function callGeminiFlash(
+async function callGeminiModel(
   apiKey: string,
   model: string,
   prompt: string,
@@ -221,7 +404,7 @@ async function callGeminiFlash(
     if (resp.status === 429 && retryCount < 3) {
       console.log(`Rate limited (attempt ${retryCount + 1}/3), waiting 30s...`);
       await delay(30000);
-      return callGeminiFlash(apiKey, model, prompt, systemInstruction, retryCount + 1);
+      return callGeminiModel(apiKey, model, prompt, systemInstruction, retryCount + 1);
     }
     throw new Error(`Gemini ${model} error (${resp.status}): ${txt}`);
   }
@@ -238,7 +421,6 @@ async function ensureSettings(db: ReturnType<typeof serviceClient>) {
   const { data: existing } = await db.from("nightly_builder_settings").select("*").limit(1);
   if (existing && existing.length > 0) return existing[0];
 
-  // Create default settings
   const { data: created } = await db.from("nightly_builder_settings").insert({
     enabled: false,
     topics_per_category: 50,
@@ -258,21 +440,15 @@ async function runNightlyBuilder(batch: number) {
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
-  // Ensure settings exist
   const settings = await ensureSettings(db);
   if (!settings) throw new Error("Failed to get/create nightly builder settings");
 
-  // Enabled check is done BEFORE EdgeRuntime.waitUntil in handler
-  // Manual runs bypass enabled check (handled in HTTP handler)
-
-  // Check stop requested
   if (settings.stop_requested) {
     console.log("Stop was requested. Resetting flag and skipping.");
     await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settings.id);
     return;
   }
 
-  // Create run record
   const { data: runData } = await db.from("nightly_builder_runs").insert({
     status: batch === 1 ? "researching" : "generating",
     batch_number: batch,
@@ -282,7 +458,6 @@ async function runNightlyBuilder(batch: number) {
   const runId = runData?.id;
   if (!runId) throw new Error("Failed to create run record");
 
-  // Update last_run_at
   await db.from("nightly_builder_settings").update({
     last_run_at: new Date().toISOString(),
   }).eq("id", settings.id);
@@ -332,8 +507,9 @@ async function runBatch1(
   let categoriesCreated = 0;
   const detailsMap: Record<string, unknown> = {};
 
-  // Phase B: Research per category using Gemini Flash + Google Search
-  console.log("Phase B: Starting research for each category...");
+  // Phase B: Research per category using Deep Research (Interactions API)
+  // Deep Research has 1 RPM limit, so we space calls 65s apart
+  console.log("Phase B: Starting Deep Research for each category (1 RPM, ~65s between calls)...");
   for (const category of categories) {
     // Check stop
     const { data: freshSettings } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
@@ -377,8 +553,11 @@ async function runBatch1(
       };
       categoriesProcessed++;
 
-      // Rate limit between categories
-      await delay(3000);
+      // Deep Research: 1 RPM limit — wait 65s between categories
+      // (the polling inside deepResearchCategory already takes time,
+      // but we add a buffer to respect the RPM limit for starting new interactions)
+      console.log(`Waiting 65s before next Deep Research call (RPM limit)...`);
+      await delay(65000);
     } catch (err) {
       console.error(`Error researching category "${category.name}":`, err);
       detailsMap[category.name] = {
@@ -389,7 +568,6 @@ async function runBatch1(
   }
 
   // Phase C: Deduplication against all existing titles
-  // Check stop between phases
   const { data: stopCheckC } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
   if (stopCheckC?.stop_requested) {
     console.log("Stop requested before dedup phase. Stopping.");
@@ -408,7 +586,7 @@ async function runBatch1(
     );
   });
 
-  // Use AI for fuzzy dedup if there are many topics
+  // AI-powered fuzzy dedup using Flash Lite (4K RPM, unlimited RPD — perfect for this)
   if (dedupedTopics.length > 10 && allExistingTitles.length > 0) {
     try {
       const dedupBatches = [];
@@ -429,7 +607,7 @@ ${batchItems.map((t, i) => `${i}. ${t.topic}`).join("\n")}
 
 Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQUE and should be KEPT. Example: [0, 2, 5, 7]`;
 
-        const dedupResult = await callGeminiFlash(apiKey, MODEL_LITE, dedupPrompt,
+        const dedupResult = await callGeminiModel(apiKey, MODEL_LITE, dedupPrompt,
           "Return ONLY a JSON array of integers. No explanation.");
 
         try {
@@ -459,7 +637,6 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
   console.log(`After dedup: ${dedupedTopics.length} unique topics (was ${allTopics.length})`);
 
   // Phase D: Smart Category Creation
-  // Check stop between phases
   const { data: stopCheckD } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
   if (stopCheckD?.stop_requested) {
     console.log("Stop requested before category creation phase. Stopping.");
@@ -468,7 +645,7 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
     return;
   }
   if (allowCategoryCreation && categories.length > 0) {
-    console.log("Phase D: Checking for missing categories...");
+    console.log("Phase D: Checking for missing categories (using Flash)...");
     try {
       const categoryNames = categories.map(c => c.name).join(", ");
       const catPrompt = `You are analyzing a tech help website called DigitalHelp.
@@ -485,9 +662,9 @@ Return a JSON array of objects with "name", "description", and "icon" fields.
 For "icon", choose from: ${SAFE_ICONS.join(", ")}. Default to "Lightbulb" if unsure.
 Suggest 0-5 categories max.
 
-Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": "Help with smart home devices", "icon": "Wifi"}]`;
+Return ONLY a valid JSON array.`;
 
-      const catResult = await callGeminiFlash(apiKey, MODEL_FLASH, catPrompt,
+      const catResult = await callGeminiModel(apiKey, MODEL_FLASH, catPrompt,
         "Return ONLY a valid JSON array of category objects. No markdown.");
 
       try {
@@ -499,7 +676,6 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
             const icon = SAFE_ICONS.includes(newCat.icon) ? newCat.icon : "Lightbulb";
             const slug = newCat.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-            // Check if category already exists
             const existing = categories.find(c =>
               c.name.toLowerCase() === newCat.name.toLowerCase() ||
               c.slug === slug
@@ -518,8 +694,10 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
               console.log(`Created new category: ${newCat.name}`);
               categoriesCreated++;
 
-              // Research topics for new category
+              // Research topics for new category via Deep Research
               try {
+                console.log(`Waiting 65s for RPM limit before researching new category...`);
+                await delay(65000);
                 const newTopics = await deepResearchCategory(
                   apiKey,
                   newCat.name,
@@ -540,8 +718,6 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
               } catch (err) {
                 console.error(`Error researching new category "${newCat.name}":`, err);
               }
-
-              await delay(3000);
             }
           }
         }
@@ -554,7 +730,6 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
   }
 
   // Phase E: Queue Splitting
-  // Check stop between phases
   const { data: stopCheckE } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
   if (stopCheckE?.stop_requested) {
     console.log("Stop requested before queue splitting phase. Stopping.");
@@ -584,7 +759,7 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
     });
   }
 
-  // Insert all into queue — use IST date so overflow batches can find them (Bug 1 fix)
+  // Insert all into queue — use IST date so overflow batches can find them
   const today = getISTDateString();
   const queueInserts = [
     ...batch1Items.map(t => ({ run_date: today, batch_number: 1, topic: t.topic, category_id: t.category_id, priority: t.priority, status: "pending" })),
@@ -627,7 +802,6 @@ async function runOverflowBatch(
   runId: string,
   batch: number
 ) {
-  // Bug 1 fix: use IST date so overflow batches match batch 1's run_date
   const today = getISTDateString();
 
   const { count } = await db.from("nightly_builder_queue")
@@ -671,7 +845,6 @@ async function generateOneFromQueue(
   // Check stop flag
   if (settings.stop_requested) {
     console.log("Stop requested. Halting generation.");
-    // Bug 6 fix: atomic completion — only update if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "stopped",
       completed_at: new Date().toISOString(),
@@ -680,9 +853,7 @@ async function generateOneFromQueue(
     return;
   }
 
-  // Recover stale "processing" nightly items from crashed chains
-  // Recover items stuck in "processing" for >15 minutes
-  // Uses updated_at (set when status changed to "processing" via trigger) not created_at
+  // Recover stale "processing" nightly items (>15 min old via updated_at)
   const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
@@ -716,16 +887,13 @@ async function generateOneFromQueue(
 
   if (!queueItems || queueItems.length === 0) {
     console.log("No pending queue items. Completing run.");
-    // Bug 6 fix: atomic completion — only mark as completed if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "generating");
 
-    // Calculate and set next_run_at using settings ID
     try {
       const nextRun = calculateNextRunAt();
-      const settingsId = settings.id as string;
       await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).eq("id", settingsId);
     } catch (e) {
       console.error("Failed to set next_run_at:", e);
@@ -739,7 +907,7 @@ async function generateOneFromQueue(
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Atomically claim the item (prevents double-processing by parallel chains)
+  // Atomically claim the item
   const { data: claimed } = await db.from("nightly_builder_queue")
     .update({ status: "processing" })
     .eq("id", item.id)
@@ -791,7 +959,6 @@ async function generateOneFromQueue(
         article_id: articleId || null,
       }).eq("id", item.id);
 
-      // Atomic increment via RPC (with error handling to avoid crashing chain)
       try {
         await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_generated" });
       } catch (e) {
@@ -821,7 +988,6 @@ async function generateOneFromQueue(
       error_message: err instanceof Error ? err.message : String(err),
     }).eq("id", item.id);
 
-    // Atomic increment for failed counter (with error handling)
     try {
       await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_failed" });
     } catch (e) {
@@ -829,7 +995,7 @@ async function generateOneFromQueue(
     }
   }
 
-  // Self-chain: check if there are more items (include processing for stale recovery)
+  // Self-chain: check if there are more items
   const { count: remaining } = await db.from("nightly_builder_queue")
     .select("*", { count: "exact", head: true })
     .eq("run_date", runDate)
@@ -840,16 +1006,13 @@ async function generateOneFromQueue(
     console.log(`Self-invoking for next article (${remaining} remaining/recoverable)...`);
     selfInvoke({ action: "generate_one", runId, batch, runDate });
   } else {
-    // Bug 6 fix: atomic completion — only mark completed if still "generating"
     await db.from("nightly_builder_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "generating");
 
-    // Calculate and set next_run_at using settings ID
     try {
       const nextRun = calculateNextRunAt();
-      const settingsId = settings.id as string;
       await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).eq("id", settingsId);
     } catch (e) {
       console.error("Failed to set next_run_at:", e);
@@ -862,8 +1025,6 @@ async function generateOneFromQueue(
 // ── Recover stale "processing" items ─────────────────────────────
 
 async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
-  // Only recover items stuck in "processing" for >15 minutes
-  // Uses updated_at (set when status changed to "processing" via trigger) not created_at
   const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
@@ -888,12 +1049,10 @@ async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
         status: "completed",
         article_id: existingArticle[0].id,
       }).eq("id", item.id);
-      console.log(`Recovered "${item.topic}" — article already exists (${existingArticle[0].id})`);
     } else {
       await db.from("nightly_builder_queue").update({
         status: "pending",
       }).eq("id", item.id);
-      console.log(`Reset "${item.topic}" back to pending for retry`);
     }
     recovered++;
   }
@@ -906,10 +1065,8 @@ async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
 async function generateOneFromManualQueue(autoPublish: boolean) {
   const db = serviceClient();
 
-  // Step 1: Recover any stale "processing" items from previous dead chains
   await recoverStaleManualItems(db);
 
-  // Step 2: Fetch ONE pending manual queue item (run_date is null)
   const { data: queueItems } = await db.from("nightly_builder_queue")
     .select("*")
     .eq("status", "pending")
@@ -927,7 +1084,6 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Step 3: Atomically claim the item
   const { data: claimed } = await db.from("nightly_builder_queue")
     .update({ status: "processing" })
     .eq("id", item.id)
@@ -995,7 +1151,6 @@ async function generateOneFromManualQueue(autoPublish: boolean) {
     }).eq("id", item.id);
   }
 
-  // Step 4: ALWAYS self-chain for next item
   selfChainManualBatch(autoPublish);
 }
 
@@ -1029,7 +1184,6 @@ serve(async (req) => {
   }
 
   try {
-    // Auth: require service-role key, anon key (cron), admin user, OR headerless calls
     const authHeader = req.headers.get("Authorization");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -1037,9 +1191,7 @@ serve(async (req) => {
     if (authHeader) {
       const token = authHeader.replace("Bearer ", "");
 
-      // Allow service role key and anon key (used by pg_cron) without further checks
       if (token !== serviceKey && token !== anonKey) {
-        // Verify admin user
         const userClient = createClient(
           Deno.env.get("SUPABASE_URL")!,
           anonKey,
@@ -1057,7 +1209,6 @@ serve(async (req) => {
         if (!roleData) return jsonResp({ error: "Admin access required" }, 403);
       }
     }
-    // Note: headerless calls are also allowed for pg_cron/pg_net
 
     const body = await req.json().catch(() => ({}));
 
@@ -1075,7 +1226,7 @@ serve(async (req) => {
       return jsonResp({ success: true });
     }
 
-    // Start manual batch processing (from AIAgentPanel or auto-discover)
+    // Start manual batch processing
     if (body.action === "start_manual_batch") {
       const checkDb = serviceClient();
       const { count: pendingCount } = await checkDb.from("nightly_builder_queue")
@@ -1100,11 +1251,9 @@ serve(async (req) => {
 
     // Default: start nightly builder run
     const batch = body.batch || 1;
-    const isManualRun = !!body.manual; // frontend sets manual=true for "Run Now"
+    const isManualRun = !!body.manual;
     console.log(`Nightly Builder triggered for batch ${batch} (manual: ${isManualRun})`);
 
-    // Bug 2 fix: Check enabled BEFORE firing background task
-    // Manual runs bypass the enabled check
     if (!isManualRun) {
       const db = serviceClient();
       const settings = await ensureSettings(db);
@@ -1114,11 +1263,8 @@ serve(async (req) => {
       }
     }
 
-    // Fire-and-forget: run in background so response returns immediately
     EdgeRuntime.waitUntil(
       runNightlyBuilder(batch)
-        // Bug 7 fix: removed duplicate next_run_at update from here
-        // next_run_at is only set when generation actually completes (in generateOneFromQueue)
         .catch(e => console.error("Nightly builder execution error:", e))
     );
 
