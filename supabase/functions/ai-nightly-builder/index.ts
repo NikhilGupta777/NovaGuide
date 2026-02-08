@@ -786,7 +786,7 @@ Return ONLY a valid JSON array.`;
   }).eq("id", runId);
 
   // Phase F: Start generating Batch 1 articles via parallel self-chaining
-  const parallelism = Math.min(3, batch1Items.length, 5);
+  const parallelism = Math.min(5, batch1Items.length, 7);
   console.log(`Phase F: Starting Batch 1 article generation (${parallelism} parallel chains)...`);
   for (let i = 0; i < parallelism; i++) {
     selfInvoke({ action: "generate_one", runId, batch: 1, runDate: today });
@@ -819,7 +819,7 @@ async function runOverflowBatch(
     return;
   }
 
-  const parallelism = Math.min(3, count, 5);
+  const parallelism = Math.min(5, count, 7);
   console.log(`Processing ${count} pending items for batch ${batch} (${parallelism} parallel chains)...`);
   await db.from("nightly_builder_runs").update({ status: "generating" }).eq("id", runId);
   for (let i = 0; i < parallelism; i++) {
@@ -1239,7 +1239,7 @@ serve(async (req) => {
         return jsonResp({ success: true, message: "No items to process" });
       }
 
-      const parallelism = Math.min(body.parallelism || 3, pendingCount, 5);
+      const parallelism = Math.min(body.parallelism || 5, pendingCount, 7);
       console.log(`Starting manual batch generation (${pendingCount} items, ${parallelism} parallel chains)...`);
       
       for (let i = 0; i < parallelism; i++) {
