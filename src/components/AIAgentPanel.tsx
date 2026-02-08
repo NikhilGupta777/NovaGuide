@@ -96,6 +96,7 @@ export default function AIAgentPanel() {
   const [discoverCount, setDiscoverCount] = useState(5);
   const [autoMake, setAutoMake] = useState(false);
   const [autoPublish, setAutoPublish] = useState(false);
+  const [discoverRunId, setDiscoverRunId] = useState<string | null>(null);
 
   // Batch
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
@@ -145,7 +146,28 @@ export default function AIAgentPanel() {
     }
   }, []);
 
-  useEffect(() => { fetchRuns(); fetchAutoSettings(); }, [fetchRuns, fetchAutoSettings]);
+  // Load latest discover run from DB
+  const fetchLatestDiscoverRun = useCallback(async () => {
+    const { data } = await supabase
+      .from("discover_runs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) {
+      const topics = (data.topics as unknown as DiscoveredTopic[]) || [];
+      setDiscoveredTopics(topics);
+      if (data.status === "running") {
+        setDiscovering(true);
+        setDiscoverRunId(data.id);
+      } else {
+        setDiscovering(false);
+        setDiscoverRunId(null);
+      }
+    }
+  }, []);
+
+  useEffect(() => { fetchRuns(); fetchAutoSettings(); fetchLatestDiscoverRun(); }, [fetchRuns, fetchAutoSettings, fetchLatestDiscoverRun]);
 
   // Poll for active run status
   useEffect(() => {
@@ -168,6 +190,29 @@ export default function AIAgentPanel() {
     }, 2000);
     return () => clearInterval(interval);
   }, [pollingRunId]);
+
+  // Poll for running discover run
+  useEffect(() => {
+    if (!discoverRunId) return;
+    const interval = setInterval(async () => {
+      const { data } = await supabase
+        .from("discover_runs")
+        .select("*")
+        .eq("id", discoverRunId)
+        .single();
+      if (data && data.status !== "running") {
+        const topics = (data.topics as unknown as DiscoveredTopic[]) || [];
+        setDiscoveredTopics(topics);
+        setDiscovering(false);
+        setDiscoverRunId(null);
+        if (topics.length > 0) {
+          toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics.` });
+        }
+        clearInterval(interval);
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [discoverRunId, toast]);
 
   // Generate single article
   const handleGenerate = async (topicText?: string, catId?: string) => {
@@ -205,10 +250,20 @@ export default function AIAgentPanel() {
     }
   };
 
-  // Discover topics
+  // Discover topics — persists to DB so results survive navigation
   const handleDiscover = async () => {
     setDiscovering(true);
     setDiscoveredTopics([]);
+
+    // Create a "running" record in DB
+    const { data: runData } = await supabase
+      .from("discover_runs")
+      .insert({ status: "running", topic_count: discoverCount })
+      .select("id")
+      .single();
+    const runId = runData?.id;
+    if (runId) setDiscoverRunId(runId);
+
     try {
       const { data, error } = await supabase.functions.invoke("ai-auto-discover", {
         body: { count: discoverCount, targetCategories: [] },
@@ -216,17 +271,36 @@ export default function AIAgentPanel() {
       if (error) throw error;
       const topics = data.topics || [];
       setDiscoveredTopics(topics);
+
+      // Persist results to DB
+      if (runId) {
+        await supabase.from("discover_runs").update({
+          status: "completed",
+          topics: JSON.parse(JSON.stringify(topics)),
+          topic_count: topics.length,
+          completed_at: new Date().toISOString(),
+        }).eq("id", runId);
+      }
+      setDiscoverRunId(null);
       toast({ title: "Topics Discovered!", description: `Found ${topics.length} trending topics via Google Search.` });
 
       // Auto-make: push all to batch and start generating
       if (autoMake && topics.length > 0) {
         setBatchQueue(topics);
         toast({ title: "Auto-Make Active", description: `Pushing ${topics.length} topics to batch and starting generation...` });
-        // Start batch generation automatically
         await runBatch(topics);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Discovery failed";
+      // Persist failure to DB
+      if (runId) {
+        await supabase.from("discover_runs").update({
+          status: "failed",
+          error_message: msg,
+          completed_at: new Date().toISOString(),
+        }).eq("id", runId);
+      }
+      setDiscoverRunId(null);
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
       setDiscovering(false);
@@ -507,19 +581,39 @@ export default function AIAgentPanel() {
                   </button>
                 </div>
 
+                {discovering && discoveredTopics.length === 0 && (
+                  <div className="mt-4 p-4 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="h-5 w-5 animate-spin text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Searching the web for trending topics...</p>
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">This runs in the background — you can navigate away and come back.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {discoveredTopics.length > 0 && (
                   <div className="mt-4 space-y-2">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-sm font-medium text-foreground">Discovered Topics</h4>
-                      <button
-                        onClick={() => {
-                          discoveredTopics.forEach(addToQueue);
-                          toast({ title: "Added to batch queue", description: `${discoveredTopics.length} topics ready for batch generation.` });
-                        }}
-                        className="text-xs text-primary hover:underline"
-                      >
-                        Add all to batch →
-                      </button>
+                      <h4 className="text-sm font-medium text-foreground">Discovered Topics ({discoveredTopics.length})</h4>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            discoveredTopics.forEach(addToQueue);
+                            toast({ title: "Added to batch queue", description: `${discoveredTopics.length} topics ready for batch generation.` });
+                          }}
+                          className="text-xs text-primary hover:underline"
+                        >
+                          Add all to batch →
+                        </button>
+                        <button
+                          onClick={() => setDiscoveredTopics([])}
+                          className="text-xs text-muted-foreground hover:text-destructive"
+                        >
+                          Clear
+                        </button>
+                      </div>
                     </div>
                     {discoveredTopics.map((t, i) => (
                       <div key={i} className="p-3 rounded-lg bg-muted/50 border border-border">
