@@ -137,15 +137,16 @@ export default function NightlyBuilderTab() {
         .in("status", ["researching", "generating", "pending"])
         .lt("started_at", sixHoursAgo);
 
-      // Bug 9 fix: Only recover manual queue items stuck in "processing" for >15 minutes
-      // This prevents interfering with actively running batches on page refresh
+      // Fix: Only recover manual queue items stuck in "processing" for >15 minutes
+      // Uses updated_at (set when status changed to "processing") instead of created_at
+      // to avoid resetting items that were just claimed by an active chain
       const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       await supabase
         .from("nightly_builder_queue")
         .update({ status: "pending" })
         .eq("status", "processing")
         .is("run_date", null)
-        .lt("created_at", fifteenMinAgo);
+        .lt("updated_at", fifteenMinAgo);
 
       // Re-fetch after cleanup
       await fetchRuns();

@@ -253,7 +253,7 @@ async function ensureSettings(db: ReturnType<typeof serviceClient>) {
 
 // ── Main Orchestrator ─────────────────────────────────────────────
 
-async function runNightlyBuilder(batch: number, isManualRun = false) {
+async function runNightlyBuilder(batch: number) {
   const db = serviceClient();
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
@@ -262,7 +262,7 @@ async function runNightlyBuilder(batch: number, isManualRun = false) {
   const settings = await ensureSettings(db);
   if (!settings) throw new Error("Failed to get/create nightly builder settings");
 
-  // Bug 2 fix: enabled check is now done BEFORE EdgeRuntime.waitUntil in handler
+  // Enabled check is done BEFORE EdgeRuntime.waitUntil in handler
   // Manual runs bypass enabled check (handled in HTTP handler)
 
   // Check stop requested
@@ -389,6 +389,14 @@ async function runBatch1(
   }
 
   // Phase C: Deduplication against all existing titles
+  // Check stop between phases
+  const { data: stopCheckC } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
+  if (stopCheckC?.stop_requested) {
+    console.log("Stop requested before dedup phase. Stopping.");
+    await db.from("nightly_builder_runs").update({ status: "stopped", total_categories_processed: categoriesProcessed, total_topics_found: totalTopicsFound, details: detailsMap, completed_at: new Date().toISOString() }).eq("id", runId);
+    await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
+    return;
+  }
   console.log("Phase C: Deduplicating topics...");
   const allExistingTitles = articles?.map(a => a.title.toLowerCase()) || [];
   let dedupedTopics = allTopics.filter(t => {
@@ -451,6 +459,14 @@ Return ONLY a JSON array of the INDEX NUMBERS (0-based) of topics that are UNIQU
   console.log(`After dedup: ${dedupedTopics.length} unique topics (was ${allTopics.length})`);
 
   // Phase D: Smart Category Creation
+  // Check stop between phases
+  const { data: stopCheckD } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
+  if (stopCheckD?.stop_requested) {
+    console.log("Stop requested before category creation phase. Stopping.");
+    await db.from("nightly_builder_runs").update({ status: "stopped", total_categories_processed: categoriesProcessed, total_topics_found: totalTopicsFound, total_after_dedup: dedupedTopics.length, details: detailsMap, completed_at: new Date().toISOString() }).eq("id", runId);
+    await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
+    return;
+  }
   if (allowCategoryCreation && categories.length > 0) {
     console.log("Phase D: Checking for missing categories...");
     try {
@@ -538,6 +554,14 @@ Return ONLY a valid JSON array. Example: [{"name": "Smart Home", "description": 
   }
 
   // Phase E: Queue Splitting
+  // Check stop between phases
+  const { data: stopCheckE } = await db.from("nightly_builder_settings").select("stop_requested").eq("id", settingsId).single();
+  if (stopCheckE?.stop_requested) {
+    console.log("Stop requested before queue splitting phase. Stopping.");
+    await db.from("nightly_builder_runs").update({ status: "stopped", total_categories_processed: categoriesProcessed, total_topics_found: totalTopicsFound, total_after_dedup: dedupedTopics.length, details: detailsMap, completed_at: new Date().toISOString() }).eq("id", runId);
+    await db.from("nightly_builder_settings").update({ stop_requested: false }).eq("id", settingsId);
+    return;
+  }
   console.log("Phase E: Splitting topics into batches...");
   const BATCH1_PER_CAT = 30;
   const BATCH2_PER_CAT = 50;
@@ -657,14 +681,15 @@ async function generateOneFromQueue(
   }
 
   // Recover stale "processing" nightly items from crashed chains
-  // Bug 9 fix: only recover items stuck for >15 minutes
+  // Recover items stuck in "processing" for >15 minutes
+  // Uses updated_at (set when status changed to "processing" via trigger) not created_at
   const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
     .eq("status", "processing")
     .eq("run_date", runDate)
     .eq("batch_number", batch)
-    .lt("created_at", fifteenMinAgo);
+    .lt("updated_at", fifteenMinAgo);
 
   if (staleItems && staleItems.length > 0) {
     console.log(`Recovering ${staleItems.length} stale nightly items (>15min old)...`);
@@ -697,10 +722,11 @@ async function generateOneFromQueue(
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "generating");
 
-    // Calculate and set next_run_at (only place it's set now — Bug 7 fix)
+    // Calculate and set next_run_at using settings ID
     try {
       const nextRun = calculateNextRunAt();
-      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
+      const settingsId = settings.id as string;
+      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).eq("id", settingsId);
     } catch (e) {
       console.error("Failed to set next_run_at:", e);
     }
@@ -765,8 +791,12 @@ async function generateOneFromQueue(
         article_id: articleId || null,
       }).eq("id", item.id);
 
-      // Bug 3 fix: use atomic increment via RPC instead of read-then-write
-      await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_generated" });
+      // Atomic increment via RPC (with error handling to avoid crashing chain)
+      try {
+        await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_generated" });
+      } catch (e) {
+        console.error("Failed to increment articles_generated:", e);
+      }
 
       const qualityScore = agentData._quality_score || 0;
       const factualScore = agentData._factual_score || 0;
@@ -776,7 +806,11 @@ async function generateOneFromQueue(
           status: "published",
           published_at: new Date().toISOString(),
         }).eq("id", articleId);
-        await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_published" });
+        try {
+          await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_published" });
+        } catch (e) {
+          console.error("Failed to increment articles_published:", e);
+        }
         console.log(`Auto-published: "${item.topic}"`);
       }
     }
@@ -787,8 +821,12 @@ async function generateOneFromQueue(
       error_message: err instanceof Error ? err.message : String(err),
     }).eq("id", item.id);
 
-    // Bug 3 fix: atomic increment for failed counter
-    await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_failed" });
+    // Atomic increment for failed counter (with error handling)
+    try {
+      await db.rpc("increment_nightly_counter", { _run_id: runId, _column: "articles_failed" });
+    } catch (e) {
+      console.error("Failed to increment articles_failed:", e);
+    }
   }
 
   // Self-chain: check if there are more items (include processing for stale recovery)
@@ -808,10 +846,11 @@ async function generateOneFromQueue(
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "generating");
 
-    // Calculate and set next_run_at
+    // Calculate and set next_run_at using settings ID
     try {
       const nextRun = calculateNextRunAt();
-      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).neq("id", "");
+      const settingsId = settings.id as string;
+      await db.from("nightly_builder_settings").update({ next_run_at: nextRun }).eq("id", settingsId);
     } catch (e) {
       console.error("Failed to set next_run_at:", e);
     }
@@ -823,13 +862,14 @@ async function generateOneFromQueue(
 // ── Recover stale "processing" items ─────────────────────────────
 
 async function recoverStaleManualItems(db: ReturnType<typeof serviceClient>) {
-  // Bug 9 fix: Only recover items stuck in "processing" for >15 minutes
+  // Only recover items stuck in "processing" for >15 minutes
+  // Uses updated_at (set when status changed to "processing" via trigger) not created_at
   const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const { data: staleItems } = await db.from("nightly_builder_queue")
     .select("id, topic")
     .eq("status", "processing")
     .is("run_date", null)
-    .lt("created_at", fifteenMinAgo);
+    .lt("updated_at", fifteenMinAgo);
 
   if (!staleItems || staleItems.length === 0) return 0;
 
@@ -1076,7 +1116,7 @@ serve(async (req) => {
 
     // Fire-and-forget: run in background so response returns immediately
     EdgeRuntime.waitUntil(
-      runNightlyBuilder(batch, isManualRun)
+      runNightlyBuilder(batch)
         // Bug 7 fix: removed duplicate next_run_at update from here
         // next_run_at is only set when generation actually completes (in generateOneFromQueue)
         .catch(e => console.error("Nightly builder execution error:", e))

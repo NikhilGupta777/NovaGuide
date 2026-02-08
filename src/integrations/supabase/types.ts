@@ -508,6 +508,7 @@ export type Database = {
           run_date: string | null
           status: string | null
           topic: string
+          updated_at: string | null
         }
         Insert: {
           article_id?: string | null
@@ -520,6 +521,7 @@ export type Database = {
           run_date?: string | null
           status?: string | null
           topic: string
+          updated_at?: string | null
         }
         Update: {
           article_id?: string | null
@@ -532,6 +534,7 @@ export type Database = {
           run_date?: string | null
           status?: string | null
           topic?: string
+          updated_at?: string | null
         }
         Relationships: [
           {
