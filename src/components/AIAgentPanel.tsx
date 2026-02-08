@@ -1061,6 +1061,45 @@ export default function AIAgentPanel() {
                     {selectedRun.error_message}
                   </div>
                 )}
+
+                {/* Retry button for skipped runs */}
+                {selectedRun.status === "skipped" && (
+                  <button
+                    onClick={async () => {
+                      setGenerating(true);
+                      try {
+                        const { data, error } = await supabase.functions.invoke("ai-agent", {
+                          body: { topic: selectedRun.topic, mode: "retry", skipDuplicateCheck: true },
+                        });
+                        if (error) throw error;
+                        if (data?.error) throw new Error(data.error);
+                        toast({ title: "Article Generated!", description: `"${data.title}" saved as draft.` });
+                        setPollingRunId(data._run_id);
+                        refetchArticles();
+                        fetchRuns();
+                      } catch (err: unknown) {
+                        const msg = err instanceof Error ? err.message : "Retry failed";
+                        toast({ title: "Error", description: msg, variant: "destructive" });
+                      } finally {
+                        setGenerating(false);
+                      }
+                    }}
+                    disabled={isAnyOperationRunning}
+                    className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {generating ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Generating (skip dup check)...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Force Generate (Skip Duplicate Check)
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             )}
 
@@ -1106,6 +1145,33 @@ export default function AIAgentPanel() {
                         )}
                         {run.status === "completed" && (
                           <Eye className="h-3 w-3 text-muted-foreground ml-auto" />
+                        )}
+                        {run.status === "skipped" && (
+                          <span
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setGenerating(true);
+                              try {
+                                const { data, error } = await supabase.functions.invoke("ai-agent", {
+                                  body: { topic: run.topic, mode: "retry", skipDuplicateCheck: true },
+                                });
+                                if (error) throw error;
+                                if (data?.error) throw new Error(data.error);
+                                toast({ title: "Article Generated!", description: `"${data.title}" saved as draft.` });
+                                setPollingRunId(data._run_id);
+                                refetchArticles();
+                                fetchRuns();
+                              } catch (err: unknown) {
+                                const msg = err instanceof Error ? err.message : "Retry failed";
+                                toast({ title: "Error", description: msg, variant: "destructive" });
+                              } finally {
+                                setGenerating(false);
+                              }
+                            }}
+                            className="ml-auto text-[10px] text-primary font-medium hover:underline cursor-pointer"
+                          >
+                            Force Generate →
+                          </span>
                         )}
                       </div>
                     </button>

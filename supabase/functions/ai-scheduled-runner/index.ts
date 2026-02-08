@@ -290,7 +290,7 @@ Return ONLY valid JSON, no markdown.`;
         }], "Check if the topic is a duplicate of existing content.");
 
         const dupArgs = extractFunctionCall(dupResp);
-        if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 80) {
+        if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 90) {
           console.log(`Skipping duplicate: "${t.topic}"`);
           await db.from("agent_runs").update({ status: "skipped", error_message: "Duplicate topic", completed_at: new Date().toISOString() }).eq("id", runId);
           continue;
