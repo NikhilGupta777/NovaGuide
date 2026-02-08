@@ -12,7 +12,7 @@ import ReadingProgress from "@/components/ReadingProgress";
 import ShareButtons from "@/components/ShareButtons";
 import TableOfContents from "@/components/TableOfContents";
 import ArticleFeedback from "@/components/ArticleFeedback";
-import { useArticleBySlug, useArticlesByCategory, useCategories } from "@/hooks/useDatabase";
+import { useArticleBySlug, useRecommendedArticles, useCategories } from "@/hooks/useDatabase";
 import { getCategoryColors } from "@/lib/iconMap";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -22,13 +22,17 @@ const ArticlePage = () => {
   const { categories } = useCategories();
 
   const category = categories.find((c) => c.id === article?.category_id);
-  const { articles: relatedArticles } = useArticlesByCategory(category?.id);
+  const { articles: relatedArticles } = useRecommendedArticles(article?.id);
   const colors = category ? getCategoryColors(category.icon) : null;
 
-  // Increment view count
+  // Increment view count (deduplicated per session)
   useEffect(() => {
     if (slug && article) {
-      supabase.rpc("increment_view_count", { _slug: slug });
+      const key = `viewed_${slug}`;
+      if (!sessionStorage.getItem(key)) {
+        supabase.rpc("increment_view_count", { _slug: slug });
+        sessionStorage.setItem(key, "1");
+      }
     }
   }, [slug, article?.id]);
 
@@ -55,15 +59,8 @@ const ArticlePage = () => {
     );
   }
 
-  // Smart related: prefer same tags, fallback to same category
-  const related = relatedArticles
-    .filter((a) => a.id !== article.id)
-    .sort((a, b) => {
-      const aTags = (a.tags || []).filter((t) => (article.tags || []).includes(t)).length;
-      const bTags = (b.tags || []).filter((t) => (article.tags || []).includes(t)).length;
-      return bTags - aTags;
-    })
-    .slice(0, 3);
+  const related = relatedArticles.slice(0, 3);
+  const sidebarRelated = relatedArticles.slice(0, 5);
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -177,11 +174,11 @@ const ArticlePage = () => {
           <aside className="space-y-6 print:hidden">
             {article.content && <TableOfContents content={article.content} />}
             <AdPlaceholder type="sidebar" />
-            {related.length > 0 && (
+            {sidebarRelated.length > 0 && (
               <div className="bg-card rounded-xl border border-border p-5">
-                <h3 className="font-semibold text-foreground mb-3 text-sm">More in {category?.name}</h3>
+                <h3 className="font-semibold text-foreground mb-3 text-sm">Recommended</h3>
                 <div className="space-y-1">
-                  {related.slice(0, 5).map((a) => (
+                  {sidebarRelated.map((a) => (
                     <ArticleCard key={a.id} article={a} categories={categories} variant="compact" />
                   ))}
                 </div>
