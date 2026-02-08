@@ -237,6 +237,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         category_id: t.category_id || null,
         priority: t.priority === "high" ? 1 : t.priority === "medium" ? 2 : 3,
         status: "pending",
+        run_date: null,      // Must be null — generateOneFromManualQueue filters by run_date IS NULL
+        batch_number: null,  // Must be null — DB default is 1 which would route to nightly flow
       }));
 
       const { error: queueError } = await db.from("nightly_builder_queue").insert(insertRows);
