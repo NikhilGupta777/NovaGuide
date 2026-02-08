@@ -1,299 +1,109 @@
 
 
-# Comprehensive Website Improvement Plan for DigitalHelp
-
-## 1. Dark Mode Toggle (Currently Missing)
-
-The CSS already has full dark mode variables defined, but there is no toggle button anywhere in the UI for users to switch between light and dark mode. We will add a theme toggle button in the header using the already-installed `next-themes` package.
-
-**Changes:**
-- Create a `ThemeToggle` component with sun/moon icon
-- Wrap the app with `ThemeProvider` from `next-themes`
-- Add the toggle to the header in `Layout.tsx` (desktop and mobile)
-
----
-
-## 2. Contact Form Actually Sends Messages
-
-The contact form currently does nothing -- it just shows a success message without saving or sending anything. We will store submissions in a database table so the admin can read them.
-
-**Changes:**
-- Create a `contact_submissions` table (name, email, subject, message, created_at)
-- RLS: allow anonymous inserts, admin-only reads
-- Update `ContactPage.tsx` to insert into the database
-- Add a "Messages" tab in AdminDashboard to view submissions
-
----
-
-## 3. Article View Counter & Analytics
-
-No tracking of article popularity exists. Adding view counts helps surface popular content and gives the admin useful data.
-
-**Changes:**
-- Add a `view_count` column to the `articles` table (default 0)
-- Create a database function `increment_view_count(article_slug)` that safely increments
-- Call it from `ArticlePage.tsx` on load
-- Show view counts on ArticleCards and in the admin dashboard
-- Add a "Most Popular" section on the homepage
-
----
-
-## 4. Full-Text Search (Replace ILIKE)
-
-Currently search uses `ILIKE` which is slow and misses partial word matches. Postgres full-text search is much better.
-
-**Changes:**
-- Add a `search_vector` tsvector column to `articles`
-- Create a trigger to auto-update it from title + excerpt + content
-- Create a database function `search_articles(query text)` using `ts_rank`
-- Update `useSearchArticles` hook to call the new function
-- Add search result highlighting
-
----
-
-## 5. Table of Contents for Articles
-
-Long articles have no navigation. Adding an auto-generated Table of Contents from headings improves readability.
-
-**Changes:**
-- Create a `TableOfContents` component that parses markdown headings
-- Add it to the article sidebar in `ArticlePage.tsx`
-- Implement smooth scroll-to-heading with active heading tracking
-- Make it sticky on desktop, collapsible on mobile
-
----
-
-## 6. Reading Progress Bar
-
-A visual indicator showing how far a user has scrolled through an article.
-
-**Changes:**
-- Create a `ReadingProgress` component (thin bar at top of page)
-- Add it to `ArticlePage.tsx`
-- Uses scroll position relative to article content height
-
----
-
-## 7. Article Sharing Buttons
-
-No way to share articles on social media or copy a link.
-
-**Changes:**
-- Create a `ShareButtons` component (Copy Link, Twitter/X, WhatsApp, Facebook)
-- Add to `ArticlePage.tsx` after the article header and at the bottom
-- Use native `navigator.share` API on mobile as primary option
-
----
-
-## 8. Estimated Article Count on Category Cards
-
-Category cards show description but not how many articles are in each category, making them less informative.
-
-**Changes:**
-- Query actual article counts per category (or use the existing `article_count` column and keep it synced with a trigger)
-- Display "X articles" on each `CategoryCard`
-
----
-
-## 9. Bookmark / Save Articles (with Local Storage)
-
-Users cannot save articles for later reading.
-
-**Changes:**
-- Create a `useBookmarks` hook using localStorage
-- Add a bookmark icon button on `ArticleCard` and `ArticlePage`
-- Create a `/bookmarks` page listing saved articles
-- Add "Bookmarks" link in the header navigation
-
----
-
-## 10. Newsletter / Email Subscription
-
-No way to capture email subscribers for updates.
-
-**Changes:**
-- Create an `email_subscribers` table (email, subscribed_at)
-- RLS: allow anonymous inserts, admin reads
-- Add a newsletter signup component to the homepage and footer
-- Add subscriber list view in admin dashboard
-
----
-
-## 11. "Back to Top" Button
-
-Long pages have no quick way to scroll back to the top.
-
-**Changes:**
-- Create a `BackToTop` component that appears after scrolling down 300px
-- Add it to `Layout.tsx`
-
----
-
-## 12. Breadcrumb Schema Markup (SEO)
-
-BreadcrumbNav renders visually but has no structured data for search engines.
-
-**Changes:**
-- Add JSON-LD BreadcrumbList schema to `BreadcrumbNav.tsx`
-- Improves search result display in Google
-
----
-
-## 13. Sitemap Generation
-
-No sitemap exists for search engine crawling.
-
-**Changes:**
-- Create an edge function `sitemap` that generates XML sitemap from all published articles and categories
-- Add sitemap reference in `robots.txt`
-
----
-
-## 14. "Was This Helpful?" Feedback on Articles
-
-No way for readers to give feedback on article quality.
-
-**Changes:**
-- Create an `article_feedback` table (article_id, helpful boolean, created_at)
-- RLS: allow anonymous inserts
-- Add thumbs up/down buttons at the bottom of each article
-- Show helpfulness percentage to admin
-
----
-
-## 15. Pagination for Article Lists
-
-Category pages and search results load all articles at once with no pagination. This will become slow as content grows.
-
-**Changes:**
-- Add pagination to `useArticlesByCategory` and `useSearchArticles` (limit + offset)
-- Create a reusable `Pagination` component (already exists in UI library)
-- Apply to CategoryPage, SearchPage, and Latest Articles on homepage
-
----
-
-## 16. Related Articles Improvement
-
-Related articles currently just shows other articles from the same category. We can make this smarter using tags.
-
-**Changes:**
-- Update related articles logic in `ArticlePage.tsx` to prioritize articles sharing the same tags
-- Fall back to same-category articles
-
----
-
-## 17. Print-Friendly Article Styling
-
-Articles don't print well. Adding print CSS makes guides useful offline.
-
-**Changes:**
-- Add `@media print` styles to `index.css`
-- Hide header, footer, ads, sidebar when printing
-- Add a "Print this guide" button on article pages
-
----
-
-## 18. Improved Mobile Experience
-
-Several mobile UX issues exist:
-- Search bar takes full width but no padding
-- Category cards could be horizontally scrollable
-- Article sidebar stacks below content (could be a collapsible section)
-
-**Changes:**
-- Optimize spacing and touch targets throughout
-- Make the "Other Categories" sidebar a horizontal scroll on mobile
-- Improve mobile menu with better transitions
-
----
-
-## 19. Admin Dashboard Improvements
-
-- Add category management (create/edit/delete categories)
-- Add bulk actions (delete multiple articles)
-- Add article preview in a modal before publishing
-- Show content audit and nightly builder tabs properly in the tab bar
-
-**Changes:**
-- Add "Categories" tab to admin dashboard
-- Add category CRUD operations
-- Add Content Audit and Nightly Builder tabs (they exist as components but aren't all wired into the admin dashboard tabs)
-
----
-
-## 20. Performance Optimizations
-
-- Replace `framer-motion` animations with CSS animations for simpler cases (reduces JS bundle)
-- Add `loading="lazy"` to images (already done in MarkdownRenderer, but ensure all images use it)
-- Use React.lazy for admin pages (they don't need to be in the initial bundle)
-- Add proper error boundaries
-
-**Changes:**
-- Lazy-load admin routes in `App.tsx`
-- Add an `ErrorBoundary` component
-- Optimize animation usage
-
----
-
-## Technical Implementation Details
-
-### Database Migrations Required:
-1. `contact_submissions` table
-2. `view_count` column on articles + increment function
-3. `search_vector` column + trigger + search function
-4. `email_subscribers` table
-5. `article_feedback` table
-6. `article_count` sync trigger on categories
-
-### New Components:
-- `ThemeToggle.tsx`
-- `TableOfContents.tsx`
-- `ReadingProgress.tsx`
-- `ShareButtons.tsx`
-- `BackToTop.tsx`
-- `NewsletterSignup.tsx`
-- `ArticleFeedback.tsx`
-- `ErrorBoundary.tsx`
-
-### New Pages:
-- `/bookmarks` (BookmarksPage.tsx)
-
-### Edge Functions:
-- `sitemap` (generates XML sitemap)
-
-### Files Modified:
-- `src/App.tsx` (ThemeProvider, lazy routes, new routes)
-- `src/components/Layout.tsx` (ThemeToggle, BackToTop, Newsletter in footer)
-- `src/pages/Index.tsx` (Most Popular section, newsletter)
-- `src/pages/ArticlePage.tsx` (ToC, ReadingProgress, ShareButtons, Feedback, view counter)
-- `src/pages/CategoryPage.tsx` (pagination)
-- `src/pages/SearchPage.tsx` (pagination, better results)
-- `src/pages/ContactPage.tsx` (actual form submission)
-- `src/pages/AdminDashboard.tsx` (new tabs, messages, categories)
-- `src/hooks/useDatabase.ts` (full-text search, pagination, view counts)
-- `src/components/BreadcrumbNav.tsx` (schema markup)
-- `src/components/ArticleCard.tsx` (bookmark button, view count)
-- `src/components/CategoryCard.tsx` (article count display)
-- `src/index.css` (print styles)
-- `public/robots.txt` (sitemap reference)
-
-### Suggested Implementation Order:
-1. Dark mode toggle (quick win, high impact)
-2. Back to top button (quick win)
-3. Contact form database integration
-4. View counter + analytics
-5. Article feedback
-6. Table of Contents + Reading Progress
-7. Share buttons
-8. Bookmarks
-9. Full-text search
-10. Pagination
-11. Newsletter signup
-12. Sitemap + Breadcrumb schema
-13. Print styling
-14. Admin dashboard improvements
-15. Category article counts
-16. Related articles by tags
-17. Performance optimizations
-18. Mobile UX improvements
+## The Core Problem
+
+Right now, ALL long-running operations (Content Audit scan, Fix All, Batch Generation) work the same broken way:
+
+1. The browser starts a `while` loop
+2. Each iteration calls the edge function for one small chunk
+3. The edge function processes it and returns
+4. The browser calls again for the next chunk
+5. **If you refresh or leave, the loop dies and remaining work is abandoned**
+
+The "auto-resume" workaround (localStorage flag + checking on mount) only restarts when you come back -- it does NOT continue in the background.
+
+`EdgeRuntime.waitUntil()` also does NOT work for long tasks because the container shuts down after ~60-150 seconds regardless.
+
+## The Solution: Self-Chaining Edge Functions
+
+The edge function will call ITSELF to process the next chunk before returning. This creates a server-side chain that runs independently of the browser:
+
+```text
+Browser clicks "Fix All"
+       |
+       v
+  Edge Function (chunk 1)
+    - Processes 3 findings
+    - Saves progress to DB
+    - Fires fetch() to ITSELF for chunk 2 (fire-and-forget)
+    - Returns immediately to browser
+       |
+       v
+  Edge Function (chunk 2)  <-- triggered by server, NOT browser
+    - Processes next 3 findings
+    - Saves progress to DB
+    - Fires fetch() to ITSELF for chunk 3
+    - Returns
+       |
+       v
+  ... continues until all done ...
+```
+
+The browser simply polls the database for progress updates. It never drives the loop.
+
+## What Changes
+
+### 1. Edge Function: `ai-content-audit` -- Self-Chaining
+
+**Scan action:**
+- First call: create run, detect duplicates, then self-invoke for first AI batch
+- Each subsequent self-invocation: process 3 articles, save progress, self-invoke for next batch
+- When no articles remain: mark run as "completed"
+- Uses `SUPABASE_URL` + service role key to call itself
+
+**Fix All action:**
+- First call: mark run as `fix_all_status: "fixing"`, self-invoke for first batch
+- Each self-invocation: fix 3 findings, update DB, self-invoke for next batch
+- When no open findings remain: mark `fix_all_status: "fixed"`
+
+**New helper function:**
+```typescript
+async function selfInvoke(body: Record<string, unknown>) {
+  const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ai-content-audit`;
+  fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+    },
+    body: JSON.stringify(body),
+  }).catch(err => console.error("Self-invoke failed:", err));
+  // Fire-and-forget -- don't await
+}
+```
+
+### 2. Frontend: `ContentAuditTab.tsx` -- Poll-Only
+
+- `handleRunAudit`: single fire-and-forget call to start the scan, then just poll DB
+- `handleFixAll`: single fire-and-forget call to start fix-all, then just poll DB
+- Remove the `while` loops from both `handleRunAudit` and `triggerFixAllForRun`
+- Add a polling `useEffect` that checks the run status every 5 seconds when status is "scanning" or `fix_all_status` is "fixing"
+- When the run status changes to "completed" or `fix_all_status` to "fixed", show toast and stop polling
+
+### 3. Edge Function: `ai-nightly-builder` -- Self-Chaining for Batch
+
+Same pattern: instead of relying on `EdgeRuntime.waitUntil()` for the entire batch loop, process one article per invocation and self-invoke for the next.
+
+### 4. Frontend: `AIAgentPanel.tsx` -- Batch Processing via Server
+
+- Remove the client-side `runBatch` while loop
+- Instead: a single call starts the batch, the edge function self-chains through all items
+- The UI polls `nightly_builder_queue` and `agent_runs` tables for progress
+- Remove `localStorage` "batch_running" workaround (no longer needed)
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `supabase/functions/ai-content-audit/index.ts` | Add `selfInvoke()`, convert scan and fix-all to self-chaining |
+| `src/components/ContentAuditTab.tsx` | Replace while loops with single trigger + DB polling |
+| `supabase/functions/ai-nightly-builder/index.ts` | Add `selfInvoke()`, process one article per invocation, self-chain |
+| `src/components/AIAgentPanel.tsx` | Replace client-side batch loop with single trigger + DB polling |
+
+## What This Means for You
+
+- Click "Run Audit" or "Fix All" or "Generate All" -- one click
+- Close the browser, go to another page, shut your laptop
+- Come back whenever -- all work will be done
+- The UI shows real-time progress by reading the database
 
