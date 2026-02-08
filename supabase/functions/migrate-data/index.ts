@@ -6,10 +6,9 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-// Old project credentials
-const OLD_URL = "https://adklnsyjiveftaauhqgm.supabase.co";
-const OLD_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFka2xuc3lqaXZlZnRhYXVocWdtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA1MDEyNzUsImV4cCI6MjA4NjA3NzI3NX0.op2wWa83Fj32dP15H2R-RY552DOzYYqNRQmXIhWVkj4";
+// Old project credentials (service role key stored as secret to bypass RLS)
+const OLD_URL = "https://skgbtoeipxijopliyjbx.supabase.co";
+const OLD_SERVICE_ROLE_KEY = Deno.env.get("OLD_SUPABASE_SERVICE_ROLE_KEY")!;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -17,7 +16,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const oldClient = createClient(OLD_URL, OLD_ANON_KEY);
+    const oldClient = createClient(OLD_URL, OLD_SERVICE_ROLE_KEY);
 
     // New project uses service role to bypass RLS for inserts
     const newClient = createClient(
