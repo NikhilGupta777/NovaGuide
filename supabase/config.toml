@@ -18,8 +18,6 @@ verify_jwt = false
 [functions.ai-ask]
 verify_jwt = false
 
-[functions.ai-scheduled-runner]
-verify_jwt = false
 
 [functions.sitemap]
 verify_jwt = false
