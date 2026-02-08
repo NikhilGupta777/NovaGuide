@@ -119,7 +119,7 @@ export function usePopularArticles(limit = 6) {
       .from("articles")
       .select("*")
       .eq("status", "published")
-      .order("view_count" as any, { ascending: false })
+      .order("view_count", { ascending: false })
       .limit(limit)
       .then(({ data }) => {
         if (data) setArticles(data as DbArticle[]);

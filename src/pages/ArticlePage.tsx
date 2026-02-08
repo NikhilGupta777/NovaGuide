@@ -117,8 +117,8 @@ const ArticlePage = () => {
                       {new Date(article.published_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
                     </span>
                   )}
-                  {(article as any).view_count > 0 && (
-                    <span className="text-xs text-muted-foreground">{(article as any).view_count} views</span>
+                  {article.view_count && article.view_count > 0 && (
+                    <span className="text-xs text-muted-foreground">{article.view_count} views</span>
                   )}
                 </div>
                 <div className="flex items-center gap-3">
