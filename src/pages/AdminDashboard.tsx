@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   BookOpen, Plus, Edit, Trash2, Eye, Bot, LogOut, FileText,
   LayoutDashboard, Loader2, CheckCircle, Clock, AlertCircle,
-  ChevronDown, Search, Rocket, Mail, Users, Shield, Wrench
+  ChevronDown, Search, Rocket, Mail, Users, Shield, Wrench, RefreshCw
 } from "lucide-react";
 import type { Tables } from "@/integrations/supabase/types";
 import AIAgentPanel from "@/components/AIAgentPanel";
@@ -233,6 +233,9 @@ const AdminDashboard = () => {
                 </select>
                 <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
               </div>
+              <button onClick={() => refetch()} title="Refresh articles" className="flex items-center gap-2 px-3 py-2 border border-input bg-background rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+                <RefreshCw className={`h-4 w-4 ${articlesLoading ? 'animate-spin' : ''}`} />
+              </button>
               {unpublishedCount > 0 && (
                 <button onClick={handlePublishAll} className="flex items-center gap-2 px-4 py-2 bg-cat-howto text-white rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">
                   <Rocket className="h-4 w-4" />Publish All ({unpublishedCount})
