@@ -272,22 +272,22 @@ Return ONLY valid JSON, no markdown.`;
         if (!run) throw new Error("Failed to create run record");
         const runId = run.id;
 
-        // Step 1: Duplicate check (Flash Lite - cheapest)
+        // Step 1: Duplicate check — content overlap, not title similarity
         const dupResp = await callGemini(GEMINI_API_KEY, MODEL_LITE, [
-          { role: "user", parts: [{ text: `Is "${t.topic}" too similar to any of these?\n${existingTitles.map((title, idx) => `${idx + 1}. ${title}`).join("\n")}\n\nRespond with the check_duplicate function.` }] }
+          { role: "user", parts: [{ text: `Would an article about "${t.topic}" provide substantially the same advice/steps as any of these existing articles?\n${existingTitles.map((title, idx) => `${idx + 1}. ${title}`).join("\n")}\n\nOnly mark as duplicate if 80%+ of the actual content/steps would be identical. Different angles on similar topics are NOT duplicates.\n\nRespond with the check_duplicate function.` }] }
         ], [{
           function_declarations: [{
             name: "check_duplicate",
             parameters: {
               type: "OBJECT",
               properties: {
-                is_duplicate: { type: "BOOLEAN" },
-                similarity_score: { type: "NUMBER" },
+                is_duplicate: { type: "BOOLEAN", description: "True ONLY if 80%+ of content/steps would be identical" },
+                similarity_score: { type: "NUMBER", description: "Content overlap score 0-100" },
               },
               required: ["is_duplicate", "similarity_score"]
             }
           }]
-        }], "Check if the topic is a duplicate of existing content.");
+        }], "You analyze content overlap, not title similarity. Two articles about the same broad topic but different angles/solutions are NOT duplicates. Only flag if the actual steps/advice would be nearly identical.");
 
         const dupArgs = extractFunctionCall(dupResp);
         if (dupArgs?.is_duplicate && (dupArgs.similarity_score as number) >= 90) {

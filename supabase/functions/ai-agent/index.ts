@@ -176,7 +176,16 @@ async function step1_duplicateCheck(
 
   if (existingTitles.length === 0) return { isDuplicate: false };
 
-  const systemPrompt = `You are a content similarity checker. Compare the proposed topic against existing article titles. Determine if the topic is too similar to any existing article (would cover essentially the same content).
+  const systemPrompt = `You are a content overlap analyzer for a tech help website. Your job is to determine if a proposed article would provide SUBSTANTIALLY THE SAME advice, steps, and solutions as an existing article.
+
+IMPORTANT RULES:
+- Two articles about the SAME broad topic but with DIFFERENT angles, audiences, or solutions are NOT duplicates.
+- Example: "Why is my internet slow? Speed fixes" vs "Internet not working: Troubleshooting guide" → NOT duplicates (one is about speed optimization, the other is about connectivity failure)
+- Example: "How to clear cache on Chrome" vs "How to clear cache on your browser" → DUPLICATES (same steps, same solution)
+- Example: "Phone storage full: free up space" vs "How to clear cache on your device" → NOT duplicates (different scope)
+- Only mark as duplicate if 80%+ of the actual article CONTENT/STEPS would be identical.
+- When in doubt, mark as NOT duplicate — it's better to have two slightly related articles than to miss useful content.
+
 Return your analysis using the check_duplicate function.`;
 
   const prompt = `Proposed topic: "${topic}"
@@ -184,7 +193,7 @@ Return your analysis using the check_duplicate function.`;
 Existing articles:
 ${existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
-Is this topic too similar to any existing article? A score of 90+ means it's a duplicate (only skip if topics are nearly identical).`;
+Would the proposed article cover essentially the SAME solutions/steps as any existing article? Only flag as duplicate if the actual content would overlap 80%+. Different angles on similar topics are NOT duplicates.`;
 
   const response = await callGemini(apiKey, MODEL_LITE, [
     { role: "user", parts: [{ text: prompt }] }
@@ -196,10 +205,10 @@ Is this topic too similar to any existing article? A score of 90+ means it's a d
         parameters: {
           type: "OBJECT",
           properties: {
-            is_duplicate: { type: "BOOLEAN", description: "True if topic is too similar to existing content" },
-            similarity_score: { type: "NUMBER", description: "Similarity score 0-100" },
+            is_duplicate: { type: "BOOLEAN", description: "True ONLY if the proposed article would have 80%+ of the same steps/solutions as an existing one" },
+            similarity_score: { type: "NUMBER", description: "Content overlap score 0-100 (how much of the actual advice/steps would be identical)" },
             similar_to: { type: "STRING", description: "Title of the most similar existing article, or empty string" },
-            reasoning: { type: "STRING", description: "Brief explanation" }
+            reasoning: { type: "STRING", description: "Brief explanation of WHY content would or would not overlap" }
           },
           required: ["is_duplicate", "similarity_score", "similar_to", "reasoning"]
         }
