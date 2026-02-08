@@ -25,25 +25,24 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const MODEL = "google/gemini-2.5-flash";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const MODEL = "gemini-2.5-flash";
 
 async function callAI(apiKey: string, prompt: string, systemInstruction: string): Promise<string> {
-  const resp = await fetch(AI_GATEWAY, {
+  const url = `${GEMINI_BASE}/models/${MODEL}:generateContent?key=${apiKey}`;
+
+  const body: Record<string, unknown> = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.3 },
+  };
+  if (systemInstruction) {
+    body.systemInstruction = { parts: [{ text: systemInstruction }] };
+  }
+
+  const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.3,
-      max_tokens: 8192,
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -53,11 +52,11 @@ async function callAI(apiKey: string, prompt: string, systemInstruction: string)
       await delay(15000);
       return callAI(apiKey, prompt, systemInstruction);
     }
-    throw new Error(`AI error (${resp.status}): ${txt}`);
+    throw new Error(`Gemini API error (${resp.status}): ${txt}`);
   }
 
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content || "";
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
 // ── Duplicate Detection ──────────────────────────────────────────
@@ -193,8 +192,8 @@ Apply only these minor fixes and return the corrected article as JSON.`;
 
 async function runContentAudit(autoFix: boolean) {
   const db = serviceClient();
-  const apiKey = Deno.env.get("LOVABLE_API_KEY");
-  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
+  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
   // Create audit run
   const { data: runData } = await db.from("content_audit_runs").insert({
@@ -389,8 +388,8 @@ async function runContentAudit(autoFix: boolean) {
 
 async function applyFixToArticle(findingId: string) {
   const db = serviceClient();
-  const apiKey = Deno.env.get("LOVABLE_API_KEY");
-  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
+  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
   // Get finding
   const { data: finding } = await db.from("content_audit_findings")
