@@ -355,6 +355,36 @@ export type Database = {
         }
         Relationships: []
       }
+      discover_runs: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          status: string
+          topic_count: number
+          topics: Json
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          status?: string
+          topic_count?: number
+          topics?: Json
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          status?: string
+          topic_count?: number
+          topics?: Json
+        }
+        Relationships: []
+      }
       nightly_builder_queue: {
         Row: {
           article_id: string | null
