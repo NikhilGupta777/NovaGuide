@@ -98,11 +98,12 @@ export default function AIAgentPanel() {
   const [autoPublish, setAutoPublish] = useState(false);
   const [discoverRunId, setDiscoverRunId] = useState<string | null>(null);
 
-  // Batch
+  // Batch — persisted via nightly_builder_queue table
   const [batchQueue, setBatchQueue] = useState<DiscoveredTopic[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
   const batchAbortRef = useRef(false);
+  const batchRunningRef = useRef(false);
 
   // Automation
   const [autoSettings, setAutoSettings] = useState<AutoSettings | null>(null);
@@ -167,7 +168,27 @@ export default function AIAgentPanel() {
     }
   }, []);
 
-  useEffect(() => { fetchRuns(); fetchAutoSettings(); fetchLatestDiscoverRun(); }, [fetchRuns, fetchAutoSettings, fetchLatestDiscoverRun]);
+  // Load persisted batch queue from nightly_builder_queue
+  const fetchBatchQueue = useCallback(async () => {
+    const { data } = await supabase
+      .from("nightly_builder_queue")
+      .select("*")
+      .eq("status", "pending")
+      .is("run_date", null)
+      .order("priority", { ascending: true })
+      .order("created_at", { ascending: true });
+    if (data && data.length > 0 && !batchRunningRef.current) {
+      const topics: DiscoveredTopic[] = data.map(d => ({
+        topic: d.topic,
+        category_id: d.category_id || "",
+        priority: (d.priority === 1 ? "high" : d.priority === 2 ? "medium" : "low") as "high" | "medium" | "low",
+        reasoning: "",
+      }));
+      setBatchQueue(topics);
+    }
+  }, []);
+
+  useEffect(() => { fetchRuns(); fetchAutoSettings(); fetchLatestDiscoverRun(); fetchBatchQueue(); }, [fetchRuns, fetchAutoSettings, fetchLatestDiscoverRun, fetchBatchQueue]);
 
   // Poll for active run status
   useEffect(() => {
@@ -298,6 +319,7 @@ export default function AIAgentPanel() {
   const runBatch = async (items: DiscoveredTopic[]) => {
     if (items.length === 0) return;
     batchAbortRef.current = false;
+    batchRunningRef.current = true;
     setBatchRunning(true);
     setBatchProgress(0);
     let successCount = 0;
@@ -326,13 +348,20 @@ export default function AIAgentPanel() {
               status: "published",
               published_at: new Date().toISOString(),
             }).eq("id", articleId);
-            console.log(`Auto-published article: ${articleId}`);
           }
         }
+        // Mark queue item done in DB
+        await supabase.from("nightly_builder_queue")
+          .delete()
+          .eq("topic", item.topic)
+          .eq("status", "pending")
+          .is("run_date", null);
       } catch (err) {
         console.error(`Batch item ${i} failed:`, err);
         failCount++;
       }
+      // Refresh runs list after each item
+      fetchRuns();
       if (i < items.length - 1 && !batchAbortRef.current) {
         await new Promise(r => setTimeout(r, 5000));
       }
@@ -345,6 +374,7 @@ export default function AIAgentPanel() {
     }
     setBatchQueue([]);
     setBatchRunning(false);
+    batchRunningRef.current = false;
     setBatchProgress(0);
     batchAbortRef.current = false;
     refetchArticles();
@@ -384,14 +414,27 @@ export default function AIAgentPanel() {
     }
   };
 
-  const addToQueue = (topic: DiscoveredTopic) => {
+  const addToQueue = async (topic: DiscoveredTopic) => {
     if (!batchQueue.find(t => t.topic === topic.topic)) {
       setBatchQueue(prev => [...prev, topic]);
+      // Persist to DB
+      await supabase.from("nightly_builder_queue").insert({
+        topic: topic.topic,
+        category_id: topic.category_id || null,
+        priority: topic.priority === "high" ? 1 : topic.priority === "medium" ? 2 : 3,
+        status: "pending",
+      });
     }
   };
 
-  const removeFromQueue = (topicText: string) => {
+  const removeFromQueue = async (topicText: string) => {
     setBatchQueue(prev => prev.filter(t => t.topic !== topicText));
+    // Remove from DB
+    await supabase.from("nightly_builder_queue")
+      .delete()
+      .eq("topic", topicText)
+      .eq("status", "pending")
+      .is("run_date", null);
   };
 
   const priorityBadge = (p: string) => {
@@ -586,8 +629,10 @@ export default function AIAgentPanel() {
                       <h4 className="text-sm font-medium text-foreground">Discovered Topics ({discoveredTopics.length})</h4>
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => {
-                            discoveredTopics.forEach(addToQueue);
+                          onClick={async () => {
+                            for (const t of discoveredTopics) {
+                              await addToQueue(t);
+                            }
                             toast({ title: "Added to batch queue", description: `${discoveredTopics.length} topics ready for batch generation.` });
                           }}
                           className="text-xs text-primary hover:underline"
