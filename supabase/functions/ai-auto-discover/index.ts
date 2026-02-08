@@ -88,7 +88,7 @@ serve(async (req) => {
       });
     }
 
-    const { count = 5, targetCategories = [] } = await req.json();
+    const { count = 5, targetCategories = [], discoverRunId } = await req.json();
 
     // Fetch existing articles and categories
     const [categoriesRes, articlesRes] = await Promise.all([
@@ -217,6 +217,17 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
     console.log("Auto-discover: Found", result.topics?.length, "topics");
 
+    // Persist results to discover_runs table
+    if (discoverRunId) {
+      await db.from("discover_runs").update({
+        status: "completed",
+        topics: result.topics || [],
+        topic_count: result.topics?.length || 0,
+        completed_at: new Date().toISOString(),
+      }).eq("id", discoverRunId);
+      console.log("Updated discover_run:", discoverRunId);
+    }
+
     // Log the discovery
     await db.from("agent_logs").insert({
       action: `Discovered ${result.topics?.length || 0} topics (Gemini + Google Search)`,
@@ -232,6 +243,22 @@ Return ONLY valid JSON, no markdown, no explanation.`;
     console.error("Auto-discover error:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
     const status = (error as { status?: number })?.status || 500;
+
+    // Mark discover run as failed in DB
+    try {
+      const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+      const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+      const body = await req.clone().json().catch(() => ({}));
+      if (body.discoverRunId) {
+        const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+        await db.from("discover_runs").update({
+          status: "failed",
+          error_message: message,
+          completed_at: new Date().toISOString(),
+        }).eq("id", body.discoverRunId);
+      }
+    } catch (_) { /* best effort */ }
+
     return new Response(JSON.stringify({ error: message }), {
       status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
