@@ -1063,7 +1063,7 @@ export default function AIAgentPanel() {
                 )}
 
                 {/* Retry button for skipped runs */}
-                {selectedRun.status === "skipped" && (
+                {selectedRun.status === "skipped" && !runs.some(r => r.topic === selectedRun.topic && (r.status === "completed" || r.mode === "retry")) && (
                   <button
                     onClick={async () => {
                       setGenerating(true);
@@ -1146,7 +1146,7 @@ export default function AIAgentPanel() {
                         {run.status === "completed" && (
                           <Eye className="h-3 w-3 text-muted-foreground ml-auto" />
                         )}
-                        {run.status === "skipped" && (
+                        {run.status === "skipped" && !runs.some(r => r.topic === run.topic && (r.status === "completed" || r.mode === "retry")) && (
                           <span
                             onClick={async (e) => {
                               e.stopPropagation();
