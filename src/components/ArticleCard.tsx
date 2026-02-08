@@ -18,7 +18,7 @@ const ArticleCard = ({ article, categories = [], variant = "default" }: ArticleC
   const colors = category ? getCategoryColors(category.icon) : null;
   const { toggleBookmark, isBookmarked } = useBookmarks();
   const bookmarked = isBookmarked(article.slug);
-  const viewCount = (article as any).view_count || 0;
+  const viewCount = article.view_count || 0;
 
   const handleBookmark = (e: React.MouseEvent) => {
     e.preventDefault();

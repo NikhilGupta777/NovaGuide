@@ -181,3 +181,24 @@ export function useArticlesByCategory(categoryId: string | undefined, page = 1, 
 
   return { articles, loading, total };
 }
+
+export function useRecommendedArticles(articleId: string | undefined, limit = 6) {
+  const [articles, setArticles] = useState<DbArticle[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!articleId) {
+      setArticles([]);
+      return;
+    }
+    setLoading(true);
+    supabase
+      .rpc("get_recommended_articles", { _article_id: articleId, _limit: limit })
+      .then(({ data }) => {
+        if (data) setArticles(data as DbArticle[]);
+        setLoading(false);
+      });
+  }, [articleId, limit]);
+
+  return { articles, loading };
+}

@@ -637,6 +637,37 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      get_recommended_articles: {
+        Args: { _article_id: string; _limit?: number }
+        Returns: {
+          ai_generated: boolean | null
+          author_id: string | null
+          category_id: string | null
+          content: string | null
+          created_at: string | null
+          excerpt: string | null
+          featured: boolean | null
+          id: string
+          published_at: string | null
+          read_time: number | null
+          search_vector: unknown
+          seo_description: string | null
+          seo_title: string | null
+          slug: string
+          sources: Json | null
+          status: string | null
+          tags: string[] | null
+          title: string
+          updated_at: string | null
+          view_count: number | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "articles"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
