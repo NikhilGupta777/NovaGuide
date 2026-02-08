@@ -187,29 +187,36 @@ export default function ContentAuditTab() {
 
   const handleFixAll = async () => {
     if (!selectedRunId) return;
-    const fixableCount = findings.filter(f => f.status !== "resolved" && f.article_id && f.suggestion).length;
-    if (fixableCount === 0) {
+    const fixable = findings.filter(f => f.status !== "resolved" && f.article_id && f.suggestion);
+    if (fixable.length === 0) {
       toast({ title: "Nothing to Fix", description: "No fixable findings found." });
       return;
     }
     setFixingAll(true);
-    setFixAllProgress(`Fixing ${fixableCount} issues...`);
-    try {
-      const { data, error } = await supabase.functions.invoke("ai-content-audit", {
-        body: { action: "fix_all", runId: selectedRunId },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      toast({ title: "Fix All Complete", description: data.message || `Fixed ${data.fixed} issues.` });
-      fetchFindings(selectedRunId);
-      fetchRuns();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to fix all";
-      toast({ title: "Error", description: msg, variant: "destructive" });
-    } finally {
-      setFixingAll(false);
-      setFixAllProgress("");
+    let fixed = 0;
+    let failed = 0;
+    for (const finding of fixable) {
+      setFixAllProgress(`Fixing ${fixed + 1}/${fixable.length}...`);
+      try {
+        const { data, error } = await supabase.functions.invoke("ai-content-audit", {
+          body: { action: "apply_fix", findingId: finding.id },
+        });
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        fixed++;
+        // Refresh findings to show progress
+        if (selectedRunId) fetchFindings(selectedRunId);
+      } catch {
+        failed++;
+      }
     }
+    toast({
+      title: "Fix All Complete",
+      description: `Fixed ${fixed} of ${fixable.length} issues${failed > 0 ? ` (${failed} failed)` : ""}.`,
+    });
+    setFixingAll(false);
+    setFixAllProgress("");
+    fetchRuns();
   };
 
   const isRunning = triggering || runs.some(r => r.status === "scanning" || r.status === "pending");
