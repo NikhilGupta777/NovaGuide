@@ -35,13 +35,15 @@ function selfInvoke(body: Record<string, unknown>) {
       "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
     },
     body: JSON.stringify(body),
-  }).catch(err => console.error("Self-invoke failed:", err));
+  })
+    .then(r => r.text()) // Consume response body to prevent resource leak
+    .catch(err => console.error("Self-invoke failed:", err));
 }
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODEL = "gemini-2.5-flash";
 
-async function callAI(apiKey: string, prompt: string, systemInstruction: string): Promise<string> {
+async function callAI(apiKey: string, prompt: string, systemInstruction: string, retryCount = 0): Promise<string> {
   const url = `${GEMINI_BASE}/models/${MODEL}:generateContent?key=${apiKey}`;
 
   const body: Record<string, unknown> = {
@@ -60,10 +62,11 @@ async function callAI(apiKey: string, prompt: string, systemInstruction: string)
 
   if (!resp.ok) {
     const txt = await resp.text();
-    if (resp.status === 429) {
-      console.log("Rate limited, waiting 15s...");
-      await delay(15000);
-      return callAI(apiKey, prompt, systemInstruction);
+    if (resp.status === 429 && retryCount < 3) {
+      const waitMs = 15000 + Math.random() * 15000;
+      console.log(`Rate limited (attempt ${retryCount + 1}/3), waiting ${Math.round(waitMs / 1000)}s...`);
+      await delay(waitMs);
+      return callAI(apiKey, prompt, systemInstruction, retryCount + 1);
     }
     throw new Error(`Gemini API error (${resp.status}): ${txt}`);
   }

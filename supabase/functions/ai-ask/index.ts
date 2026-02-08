@@ -259,10 +259,11 @@ Analyze the question and articles, then respond in the required JSON format.${
             Authorization: `Bearer ${serviceKey}`,
           },
           body: JSON.stringify({
-            action: "generate",
             topic: topic,
           }),
-        }).catch((err) => console.error("Failed to trigger article generation:", err));
+        })
+          .then((r) => r.text()) // Consume response body to prevent resource leak
+          .catch((err) => console.error("Failed to trigger article generation:", err));
       } else {
         console.log(`Skipping article generation - already running for similar topic: "${topic}"`);
       }
